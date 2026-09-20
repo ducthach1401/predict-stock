@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: predict-stock-mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-predict_stock}
+      MYSQL_TEST_DATABASE: ${MYSQL_TEST_DATABASE:-predict_stock_test}
+      MYSQL_APP_USER: ${MYSQL_APP_USER:-predict_app}
+      MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD:?set MYSQL_APP_PASSWORD in .env}
+      MYSQL_MIGRATOR_USER: ${MYSQL_MIGRATOR_USER:-predict_migrator}
+      MYSQL_MIGRATOR_PASSWORD: ${MYSQL_MIGRATOR_PASSWORD:?set MYSQL_MIGRATOR_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3307}:3306"
+    volumes:
+      - predict_stock_mysql:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  predict_stock_mysql:

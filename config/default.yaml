@@ -1,0 +1,60 @@
+# Default configuration. Snapshotted into job_runs.config_snapshot on every run.
+# No secrets here: DB credentials come from environment / .env.
+
+seed: 42
+
+# ---- Vietnam market constraints (principle 8) ------------------------------
+# DEFAULTS FROM THE PROJECT BRIEF / GENERAL KNOWLEDGE, NOT VERIFIED against the
+# current HOSE/HNX rulebook or your broker's fee schedule. Re-check before
+# trusting any backtest that uses them.
+market:
+  long_only: true
+  lot_size: 100
+  settlement_days: 2            # T+2 for the underlying shares
+  fee_rate: 0.0015              # per side
+  sell_tax_rate: 0.001          # sell side only
+  slippage_rate: 0.001
+  price_limit_pct:              # daily price band by exchange
+    HOSE: 0.07
+    HNX: 0.10
+    UPCOM: 0.15
+  default_exchange: HOSE
+  # HOSE tick size for stocks, prices in VND: [lower bound inclusive, tick]
+  tick_size_vnd:
+    - [0, 10]
+    - [10000, 50]
+    - [50000, 100]
+
+# ---- DNSE public market-data endpoint ---------------------------------------
+# UNDOCUMENTED by DNSE; verified only by probing (see docs/DNSE_API_NOTES.md).
+dnse:
+  base_url: https://api.dnse.com.vn/chart-api/v2/ohlcs
+  timeout_s: 30
+  min_interval_s: 0.2           # client-side throttle; real server limit unknown
+  max_retries: 4
+  backoff_base_s: 1.0
+  user_agent: "Mozilla/5.0 (predict-stock research client)"
+  price_multiplier_stock: 1000  # API quotes stock prices in thousand VND
+  price_multiplier_index: 1     # index levels are points
+  resolution: "1D"
+  bar_timezone: Asia/Ho_Chi_Minh
+
+# ---- Ingestion ----------------------------------------------------------------
+ingest:
+  history_start: "2018-01-01"
+  # Incremental runs re-fetch this many calendar days before the last stored
+  # bar and compare closes; a mismatch means DNSE re-adjusted history.
+  overlap_calendar_days: 21
+  adjust_rel_tolerance: 0.0005
+  # Today's bar is only accepted after close + buffer (avoid partial bars).
+  session_close_time: "15:00"
+  final_bar_buffer_minutes: 15
+  # Trading days = dates on which at least this fraction of the stocks that are
+  # "active" (between their first and last stored bar) have a bar. Derived from
+  # stocks, not from an index series: DNSE's VNINDEX series misses ~33 real trading days.
+  calendar_min_stock_fraction: 0.5
+  benchmark_symbols: [VNINDEX, VN30]
+
+# ---- Data-quality thresholds ----------------------------------------------------
+quality:
+  big_move_tolerance: 0.01      # flag |ret| > limit + this
