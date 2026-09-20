@@ -1,0 +1,79 @@
+# Candidate pool for the LARGE50 universe: large / well-known HOSE stocks, listed FROM MEMORY
+# by the assistant. This is NOT verified data and not a market-cap ranking. Names that
+# DNSE does not know, or that are stale/too short, are dropped and reported by the builder.
+# Edit freely; the builder ranks whatever is here by measured traded value.
+
+# banks
+VCB
+BID
+CTG
+TCB
+VPB
+MBB
+ACB
+HDB
+STB
+TPB
+VIB
+SHB
+SSB
+LPB
+MSB
+OCB
+EIB
+# real estate / construction
+VHM
+VIC
+VRE
+NVL
+KDH
+DXG
+PDR
+DIG
+KBC
+NLG
+SZC
+HDG
+CII
+CTD
+# consumer / retail
+VNM
+MSN
+MWG
+SAB
+PNJ
+FRT
+DGW
+VHC
+# energy / utilities
+GAS
+PLX
+POW
+REE
+PC1
+NT2
+GEG
+PVD
+# industrials / materials
+HPG
+HSG
+NKG
+GVR
+DGC
+DPM
+DCM
+GEX
+VCG
+# tech, aviation, logistics, insurance, other
+FPT
+BCM
+BVH
+VJC
+HVN
+GMD
+# securities
+SSI
+VND
+HCM
+VCI
+FTS

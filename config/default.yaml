@@ -39,6 +39,12 @@ dnse:
   resolution: "1D"
   bar_timezone: Asia/Ho_Chi_Minh
 
+# ---- Universes (codes are data, see `universe apply`) ---------------------------------
+universe:
+  training_code: LARGE50        # instruments the models train on (normally the wider set)
+  trading_code: LARGE50         # instruments allowed to receive recommendations (must be a subset)
+  history_floor: "2000-01-01"   # symbol history of instruments with unknown listing date starts here
+
 # ---- Ingestion ----------------------------------------------------------------
 ingest:
   history_start: "2018-01-01"
@@ -49,12 +55,32 @@ ingest:
   # Today's bar is only accepted after close + buffer (avoid partial bars).
   session_close_time: "15:00"
   final_bar_buffer_minutes: 15
+  min_sessions: 500             # daily sessions needed before an instrument is usable for training
+  auto_backfill: true           # `universe apply` backfills newly added instruments
+  intraday:                     # optional 1H bars (DNSE serves them from 2023-09-21 only)
+    enabled: false
+    resolution: "1H"
+    history_start: "2023-09-01"
+    overlap_calendar_days: 5
+  calendar_code: VN_CONSENSUS
   # Trading days = dates on which at least this fraction of the stocks that are
   # "active" (between their first and last stored bar) have a bar. Derived from
   # stocks, not from an index series: DNSE's VNINDEX series misses ~33 real trading days.
   calendar_min_stock_fraction: 0.5
+  calendar_grace_days: 30       # a stock counts as active this long after its last bar (a lone stray bar cannot make a trading day)
   benchmark_symbols: [VNINDEX, VN30]
 
 # ---- Data-quality thresholds ----------------------------------------------------
 quality:
   big_move_tolerance: 0.01      # flag |ret| > limit + this
+  return_outlier_z: 8.0         # robust z (median/MAD) of daily log returns; real data max was 9.9
+  volume_spike_ratio: 30.0      # volume / prior 60-session median
+  volume_spike_window: 60
+  price_range_vnd: [500, 5000000]
+  unit_jump_ratio: 100.0        # day-over-day ratio beyond this either way = probable unit change
+  report_path: docs/DATA_QUALITY.md
+  known_issues_path: data/quality_known_issues.csv
+
+adjustments:
+  gap_tolerance: 0.01           # open/prev_close gap beyond (band + this) = corporate-action candidate
+  detect_max_band: true         # exchange history unknown -> widest band (UPCoM 15%): only large events are visible

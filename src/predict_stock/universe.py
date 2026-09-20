@@ -1,150 +1,157 @@
-"""Point-in-time universe membership (principle 5).
+"""Point-in-time universe queries (principle 5).
 
-Nothing here knows about "VN30" or the number 30: a universe is just a code with
-dated membership rows. A symbol is a member on day d iff
-``effective_from <= d < effective_to`` (``effective_to`` empty = still a member).
+Nothing here knows about "VN30", "VN100" or a universe size: a universe is a row in
+``universes`` plus dated membership rows. Half-open intervals throughout:
 
-DNSE exposes no constituent list, so membership is loaded from a CSV you supply
-(see data/universe/README.md).
+    member on d  <=>  valid_from <= d AND (valid_to IS NULL OR d < valid_to)
+
+The symbol returned for a member is the ticker the instrument had on that date, so a
+rename or exchange move never changes who was a member.
 """
 from __future__ import annotations
 
-import csv
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
+from decimal import Decimal
 
-from sqlalchemy import or_, select
-from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.orm import Session
+from sqlalchemy import exists, or_, select
+from sqlalchemy.orm import Session, aliased
 
-from predict_stock.db.models import UniverseMembership
-from predict_stock.db.repo import ensure_instruments
-
-REQUIRED_COLUMNS = ("universe_code", "symbol", "effective_from", "effective_to")
-
-
-class MembershipError(ValueError):
-    pass
-
-
-def get_members(session: Session, universe_code: str, as_of: date) -> list[str]:
-    """Members of ``universe_code`` on ``as_of`` (sorted)."""
-    stmt = (
-        select(UniverseMembership.symbol)
-        .where(
-            UniverseMembership.universe_code == universe_code,
-            UniverseMembership.effective_from <= as_of,
-            or_(UniverseMembership.effective_to.is_(None), UniverseMembership.effective_to > as_of),
-        )
-        .distinct()
-        .order_by(UniverseMembership.symbol)
-    )
-    return list(session.scalars(stmt))
-
-
-def get_symbols_between(session: Session, universe_code: str, start: date, end: date) -> list[str]:
-    """Every symbol that was a member on at least one day in [start, end]."""
-    stmt = (
-        select(UniverseMembership.symbol)
-        .where(
-            UniverseMembership.universe_code == universe_code,
-            UniverseMembership.effective_from <= end,
-            or_(UniverseMembership.effective_to.is_(None), UniverseMembership.effective_to > start),
-        )
-        .distinct()
-        .order_by(UniverseMembership.symbol)
-    )
-    return list(session.scalars(stmt))
+from predict_stock.config import AppConfig
+from predict_stock.db.models import (
+    InstrumentStatusHistory as StatusRow,
+    InstrumentSymbolHistory as SymbolRow,
+    Universe,
+    UniverseMembership as Membership,
+)
+from predict_stock.db.repo import latest_symbol_row
 
 
 @dataclass(frozen=True)
-class _Row:
-    universe_code: str
+class Member:
+    instrument_id: int
     symbol: str
-    effective_from: date
-    effective_to: date | None
+    exchange: str | None
+    weight: Decimal | None
 
 
-def _parse_csv(path: Path) -> list[_Row]:
-    with open(path, newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(line for line in fh if line.strip() and not line.lstrip().startswith("#"))
-        missing = [c for c in REQUIRED_COLUMNS if c not in (reader.fieldnames or [])]
-        if missing:
-            raise MembershipError(f"{path}: missing columns {missing}; expected {list(REQUIRED_COLUMNS)}")
-        rows: list[_Row] = []
-        for n, rec in enumerate(reader, start=2):
-            try:
-                eff_from = date.fromisoformat(rec["effective_from"].strip())
-                eff_to = date.fromisoformat(rec["effective_to"].strip()) if rec["effective_to"].strip() else None
-            except ValueError as exc:
-                raise MembershipError(f"{path}:{n}: bad date ({exc})") from exc
-            code, symbol = rec["universe_code"].strip(), rec["symbol"].strip().upper()
-            if not code or not symbol:
-                raise MembershipError(f"{path}:{n}: empty universe_code/symbol")
-            if eff_to is not None and eff_to <= eff_from:
-                raise MembershipError(f"{path}:{n}: effective_to {eff_to} must be after effective_from {eff_from}")
-            rows.append(_Row(code, symbol, eff_from, eff_to))
-    if not rows:
-        raise MembershipError(f"{path}: no data rows")
-    return rows
+def get_universe(session: Session, code: str) -> Universe | None:
+    return session.scalars(select(Universe).where(Universe.code == code)).first()
 
 
-def _check_no_overlap(rows: list[_Row]) -> None:
-    by_key: dict[tuple[str, str], list[_Row]] = defaultdict(list)
-    for r in rows:
-        by_key[(r.universe_code, r.symbol)].append(r)
-    for (code, symbol), items in by_key.items():
-        items.sort(key=lambda r: r.effective_from)
-        for prev, nxt in zip(items, items[1:]):
-            if prev.effective_to is None or prev.effective_to > nxt.effective_from:
-                raise MembershipError(
-                    f"{code}/{symbol}: interval starting {prev.effective_from} "
-                    f"(to {prev.effective_to}) overlaps interval starting {nxt.effective_from}"
-                )
+def get_member_records(session: Session, universe_code: str, as_of: date, *, tradable_only: bool = False) -> list[Member]:
+    """Members of ``universe_code`` on ``as_of``, ordered by ticker.
+    ``tradable_only`` drops instruments suspended or delisted on that date."""
+    stmt = (
+        select(Membership.instrument_id, SymbolRow.symbol, SymbolRow.exchange, Membership.weight)
+        .join(Universe, Universe.id == Membership.universe_id)
+        .join(
+            SymbolRow,
+            (SymbolRow.instrument_id == Membership.instrument_id)
+            & (SymbolRow.valid_from <= as_of)
+            & or_(SymbolRow.valid_to.is_(None), as_of < SymbolRow.valid_to),
+        )
+        .where(
+            Universe.code == universe_code,
+            Membership.valid_from <= as_of,
+            or_(Membership.valid_to.is_(None), as_of < Membership.valid_to),
+        )
+        .order_by(SymbolRow.symbol)
+    )
+    if tradable_only:
+        stmt = stmt.where(
+            ~exists().where(
+                StatusRow.instrument_id == Membership.instrument_id,
+                StatusRow.valid_from <= as_of,
+                or_(StatusRow.valid_to.is_(None), as_of < StatusRow.valid_to),
+            )
+        )
+    return [Member(*row) for row in session.execute(stmt)]
 
 
-def load_membership_csv(session: Session, path: str | Path, source: str | None = None) -> int:
-    """Validate and idempotently upsert a membership CSV. Returns rows processed.
+def get_members(session: Session, universe_code: str, as_of: date, *, tradable_only: bool = False) -> list[str]:
+    """Tickers of ``universe_code`` on ``as_of`` (sorted)."""
+    return [m.symbol for m in get_member_records(session, universe_code, as_of, tradable_only=tradable_only)]
 
-    Re-loading the same file changes nothing. A row with the same
-    (universe_code, symbol, effective_from) but a different effective_to updates
-    it (used to close an open interval). Overlaps — within the file or against
-    rows already in the DB — are rejected before anything is written.
-    """
-    path = Path(path)
-    new_rows = _parse_csv(path)
-    keys = {(r.universe_code, r.symbol) for r in new_rows}
 
-    # Merge with existing rows for the same (universe, symbol); file rows win on same key.
-    existing = session.execute(
-        select(
-            UniverseMembership.universe_code,
-            UniverseMembership.symbol,
-            UniverseMembership.effective_from,
-            UniverseMembership.effective_to,
-        ).where(UniverseMembership.universe_code.in_({k[0] for k in keys}))
-    ).all()
-    merged: dict[tuple[str, str, date], _Row] = {
-        (e.universe_code, e.symbol, e.effective_from): _Row(*e) for e in existing if (e.universe_code, e.symbol) in keys
-    }
-    for r in new_rows:
-        merged[(r.universe_code, r.symbol, r.effective_from)] = r
-    _check_no_overlap(list(merged.values()))
+def get_instruments_between(session: Session, universe_code: str, start: date, end: date) -> list[Member]:
+    """Every instrument that was a member on at least one day of [start, end], labelled with
+    its ticker as of ``end`` (or its last ticker if it was delisted before then)."""
+    ids = list(
+        session.scalars(
+            select(Membership.instrument_id)
+            .join(Universe, Universe.id == Membership.universe_id)
+            .where(
+                Universe.code == universe_code,
+                Membership.valid_from <= end,
+                or_(Membership.valid_to.is_(None), Membership.valid_to > start),
+            )
+            .distinct()
+        )
+    )
+    out = []
+    for iid in ids:
+        row = latest_symbol_row(session, iid, end) or latest_symbol_row(session, iid)
+        out.append(Member(iid, row.symbol, row.exchange, None))
+    return sorted(out, key=lambda m: m.symbol)
 
-    ensure_instruments(session, {r.symbol for r in new_rows}, "stock")
-    src = source or path.name
-    values = [
-        {
-            "universe_code": r.universe_code,
-            "symbol": r.symbol,
-            "effective_from": r.effective_from,
-            "effective_to": r.effective_to,
-            "source": src,
-        }
-        for r in new_rows
-    ]
-    stmt = mysql_insert(UniverseMembership).values(values)
-    session.execute(stmt.on_duplicate_key_update(effective_to=stmt.inserted.effective_to, source=stmt.inserted.source))
-    return len(values)
+
+def training_members(session: Session, cfg: AppConfig, as_of: date) -> list[Member]:
+    """Instruments the models may learn from on ``as_of`` (configurable, normally the wider set)."""
+    return get_member_records(session, cfg.universe.training_code, as_of)
+
+
+def trading_members(session: Session, cfg: AppConfig, as_of: date) -> list[Member]:
+    """Instruments allowed to receive a recommendation on ``as_of``: members of the trading
+    universe that are not suspended or delisted."""
+    return get_member_records(session, cfg.universe.trading_code, as_of, tradable_only=True)
+
+
+def trading_outside_training(session: Session, cfg: AppConfig, as_of: date) -> list[str]:
+    """Tradable instruments the model was never trained on (should be empty)."""
+    train = {m.instrument_id for m in training_members(session, cfg, as_of)}
+    return [m.symbol for m in trading_members(session, cfg, as_of) if m.instrument_id not in train]
+
+
+# ---- integrity ------------------------------------------------------------------------
+
+def _overlaps(intervals: list[tuple[date, date | None, str]]) -> list[str]:
+    problems = []
+    items = sorted(intervals, key=lambda t: t[0])
+    for a, b in zip(items, items[1:]):
+        if a[1] is None or a[1] > b[0]:
+            problems.append(f"{a[2]} [{a[0]}, {a[1] or 'open'}) overlaps {b[2]} [{b[0]}, {b[1] or 'open'})")
+    return problems
+
+
+def check_integrity(session: Session) -> list[str]:
+    """Structural problems the database cannot enforce by itself (MySQL has no exclusion
+    constraints). Empty list = healthy."""
+    problems: list[str] = []
+    by_inst: dict[int, list] = defaultdict(list)
+    by_symbol: dict[str, list] = defaultdict(list)
+    for r in session.scalars(select(SymbolRow)):
+        by_inst[r.instrument_id].append((r.valid_from, r.valid_to, f"instrument {r.instrument_id} {r.symbol}"))
+        by_symbol[r.symbol].append((r.valid_from, r.valid_to, f"{r.symbol} (instrument {r.instrument_id})"))
+    for iid, iv in by_inst.items():
+        problems += [f"symbol history: {p}" for p in _overlaps(iv)]
+    for sym, iv in by_symbol.items():
+        problems += [f"ticker used by two instruments: {p}" for p in _overlaps(iv)]
+
+    st: dict[int, list] = defaultdict(list)
+    for r in session.scalars(select(StatusRow)):
+        st[r.instrument_id].append((r.valid_from, r.valid_to, f"instrument {r.instrument_id} {r.status}"))
+    for iv in st.values():
+        problems += [f"status history: {p}" for p in _overlaps(iv)]
+
+    U = aliased(Universe)
+    mem: dict[tuple[str, int], list] = defaultdict(list)
+    for m, code in session.execute(select(Membership, U.code).join(U, U.id == Membership.universe_id)):
+        mem[(code, m.instrument_id)].append((m.valid_from, m.valid_to, f"{code}/instrument {m.instrument_id}"))
+        covered = any(f <= m.valid_from and (t is None or m.valid_from < t) for f, t, _ in by_inst.get(m.instrument_id, []))
+        if not covered:
+            problems.append(f"membership {code}/instrument {m.instrument_id} starts {m.valid_from} but no symbol row covers that date")
+    for iv in mem.values():
+        problems += [f"membership: {p}" for p in _overlaps(iv)]
+    return problems

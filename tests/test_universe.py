@@ -1,119 +1,143 @@
+"""Point-in-time queries: members added/removed mid-period, renames, exchange moves,
+suspension and delisting, training vs trading universes."""
 from __future__ import annotations
 
 from datetime import date
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import text
 
-from predict_stock.db.models import UniverseMembership
+from conftest import apply
+from predict_stock import universe as uni
 from predict_stock.db.session import session_scope
-from predict_stock.universe import MembershipError, get_members, get_symbols_between, load_membership_csv
+from predict_stock.instruments import rename_symbol
 
-HEADER = "universe_code,symbol,effective_from,effective_to\n"
-
-
-def write(tmp_path, body, name="m.csv"):
-    p = tmp_path / name
-    p.write_text(HEADER + body, encoding="utf-8")
-    return p
+D = date
 
 
-def test_membership_is_point_in_time(engine, tmp_path):
-    # AAA leaves on 2024-07-01 (exclusive end), CCC joins on that day, BBB is always in.
-    f = write(tmp_path, "U1,AAA,2023-01-01,2024-07-01\nU1,BBB,2023-01-01,\nU1,CCC,2024-07-01,\n")
+def members(engine, code, d, **kw):
     with session_scope(engine) as s:
-        load_membership_csv(s, f)
-        assert get_members(s, "U1", date(2022, 12, 31)) == []
-        assert get_members(s, "U1", date(2023, 1, 1)) == ["AAA", "BBB"]            # from is inclusive
-        assert get_members(s, "U1", date(2024, 6, 30)) == ["AAA", "BBB"]
-        assert get_members(s, "U1", date(2024, 7, 1)) == ["BBB", "CCC"]            # to is exclusive
-        assert get_members(s, "U1", date(2030, 1, 1)) == ["BBB", "CCC"]
-        assert get_members(s, "OTHER", date(2024, 1, 1)) == []
+        return uni.get_members(s, code, d, **kw)
 
 
-def test_symbols_between_covers_leavers_and_joiners(engine, tmp_path):
-    f = write(tmp_path, "U1,AAA,2023-01-01,2024-07-01\nU1,BBB,2023-01-01,\nU1,CCC,2024-07-01,\nU1,DDD,2020-01-01,2022-01-01\n")
+def test_members_added_and_removed_mid_period(engine):
+    apply(engine, "U1", ["AAA", "BBB"], D(2023, 1, 1))
+    apply(engine, "U1", ["BBB", "CCC"], D(2024, 7, 1))       # AAA leaves, CCC joins
+    assert members(engine, "U1", D(2022, 12, 31)) == []
+    assert members(engine, "U1", D(2023, 1, 1)) == ["AAA", "BBB"]              # valid_from is inclusive
+    assert members(engine, "U1", D(2024, 6, 30)) == ["AAA", "BBB"]
+    assert members(engine, "U1", D(2024, 7, 1)) == ["BBB", "CCC"]              # valid_to is exclusive
+    assert members(engine, "U1", D(2030, 1, 1)) == ["BBB", "CCC"]
+    assert members(engine, "OTHER", D(2024, 1, 1)) == []
+
+
+def test_symbol_can_leave_and_rejoin(engine):
+    apply(engine, "U1", ["AAA", "BBB"], D(2020, 1, 1))
+    apply(engine, "U1", ["BBB"], D(2021, 1, 1))
+    apply(engine, "U1", ["AAA", "BBB"], D(2022, 1, 1))
+    assert members(engine, "U1", D(2020, 6, 1)) == ["AAA", "BBB"]
+    assert members(engine, "U1", D(2021, 6, 1)) == ["BBB"]
+    assert members(engine, "U1", D(2022, 6, 1)) == ["AAA", "BBB"]
+
+
+def test_rename_keeps_membership_and_identity(engine):
+    apply(engine, "U1", ["AAA", "BBB"], D(2023, 1, 1))
+    apply(engine, "U1", ["BBB", ("AAX", {"previous_symbol": "AAA"})], D(2024, 1, 1))
     with session_scope(engine) as s:
-        load_membership_csv(s, f)
-        assert get_symbols_between(s, "U1", date(2023, 6, 1), date(2024, 6, 30)) == ["AAA", "BBB"]
-        assert get_symbols_between(s, "U1", date(2024, 6, 1), date(2024, 7, 1)) == ["AAA", "BBB", "CCC"]
-        assert get_symbols_between(s, "U1", date(2021, 6, 1), date(2021, 6, 2)) == ["DDD"]
-        assert get_symbols_between(s, "U1", date(2022, 1, 1), date(2022, 6, 1)) == []  # DDD ended exactly 2022-01-01
+        before = {m.symbol: m.instrument_id for m in uni.get_member_records(s, "U1", D(2023, 6, 1))}
+        after = {m.symbol: m.instrument_id for m in uni.get_member_records(s, "U1", D(2024, 1, 1))}
+        assert sorted(before) == ["AAA", "BBB"] and sorted(after) == ["AAX", "BBB"]
+        assert before["AAA"] == after["AAX"]                                     # same instrument
+        n = s.execute(text("SELECT COUNT(*) FROM universe_membership")).scalar()
+        assert n == 2                                                             # no add/remove was needed
+        assert uni.check_integrity(s) == []
+    assert members(engine, "U1", D(2023, 12, 31)) == ["AAA", "BBB"]              # before the rename: old ticker
 
 
-def test_symbol_can_leave_and_rejoin(engine, tmp_path):
-    f = write(tmp_path, "U1,AAA,2020-01-01,2021-01-01\nU1,AAA,2022-01-01,\n")
+def test_exchange_move_is_point_in_time(engine):
+    apply(engine, "U1", [("AAA", {"exchange": "HNX"})], D(2019, 1, 1))
+    apply(engine, "U1", [("AAA", {"exchange": "HOSE"})], D(2021, 3, 1))
     with session_scope(engine) as s:
-        load_membership_csv(s, f)
-        assert get_members(s, "U1", date(2020, 6, 1)) == ["AAA"]
-        assert get_members(s, "U1", date(2021, 6, 1)) == []
-        assert get_members(s, "U1", date(2022, 6, 1)) == ["AAA"]
+        ex = lambda d: uni.get_member_records(s, "U1", d)[0].exchange
+        assert ex(D(2019, 1, 1)) == "HNX" and ex(D(2021, 2, 28)) == "HNX"
+        assert ex(D(2021, 3, 1)) == "HOSE" and ex(D(2026, 1, 1)) == "HOSE"
+        assert s.execute(text("SELECT COUNT(*) FROM universe_membership")).scalar() == 1   # still one continuous membership
+        assert uni.check_integrity(s) == []
 
 
-def test_universe_size_is_not_assumed(engine, tmp_path):
-    f = write(tmp_path, "".join(f"BIG,S{i:03d},2024-01-01,\n" for i in range(57)))
+def test_suspension_keeps_membership_but_not_tradability(engine):
+    apply(engine, "U1", ["AAA", "BBB"], D(2024, 1, 1))
+    apply(engine, "U1", ["AAA", ("BBB", {"status": "suspended"})], D(2024, 5, 1))
+    apply(engine, "U1", ["AAA", "BBB"], D(2024, 6, 1))                          # resumed
+    assert members(engine, "U1", D(2024, 5, 15)) == ["AAA", "BBB"]              # still a member
+    assert members(engine, "U1", D(2024, 5, 15), tradable_only=True) == ["AAA"]
+    assert members(engine, "U1", D(2024, 4, 30), tradable_only=True) == ["AAA", "BBB"]
+    assert members(engine, "U1", D(2024, 6, 1), tradable_only=True) == ["AAA", "BBB"]   # suspension is half-open too
+
+
+def test_delisting_closes_membership_and_ticker(engine):
+    apply(engine, "U1", ["AAA", "BBB"], D(2023, 1, 1))
+    apply(engine, "U1", ["AAA", ("BBB", {"status": "delisted"})], D(2024, 9, 1))
+    assert members(engine, "U1", D(2024, 8, 31)) == ["AAA", "BBB"]
+    assert members(engine, "U1", D(2024, 9, 1)) == ["AAA"]
     with session_scope(engine) as s:
-        load_membership_csv(s, f)
-        assert len(get_members(s, "BIG", date(2024, 6, 1))) == 57
+        # it was a member during the period, so data ingestion must still cover it
+        got = {m.symbol for m in uni.get_instruments_between(s, "U1", D(2023, 6, 1), D(2026, 1, 1))}
+        assert got == {"AAA", "BBB"}
+        assert {m.symbol for m in uni.get_instruments_between(s, "U1", D(2024, 10, 1), D(2026, 1, 1))} == {"AAA"}
+        assert uni.check_integrity(s) == []
 
 
-def test_reload_is_idempotent(engine, tmp_path):
-    f = write(tmp_path, "U1,AAA,2023-01-01,\nU1,BBB,2023-01-01,\n")
+def test_instruments_between_uses_symbol_valid_at_end(engine):
+    apply(engine, "U1", ["AAA"], D(2023, 1, 1))
     with session_scope(engine) as s:
-        load_membership_csv(s, f)
+        rename_symbol(s, "AAA", "AAX", D(2024, 1, 1))
+        assert [m.symbol for m in uni.get_instruments_between(s, "U1", D(2023, 1, 1), D(2023, 12, 31))] == ["AAA"]
+        assert [m.symbol for m in uni.get_instruments_between(s, "U1", D(2023, 1, 1), D(2024, 6, 1))] == ["AAX"]
+
+
+def test_universe_size_is_not_assumed(engine):
+    apply(engine, "BIG", [f"S{i:03d}" for i in range(100)], D(2024, 1, 1))
+    assert len(members(engine, "BIG", D(2024, 6, 1))) == 100
+
+
+def test_weights_are_point_in_time(engine):
+    apply(engine, "U1", [("AAA", {"weight": "0.6"}), ("BBB", {"weight": "0.4"})], D(2024, 1, 1))
+    apply(engine, "U1", [("AAA", {"weight": "0.5"}), ("BBB", {"weight": "0.5"})], D(2024, 7, 1))
     with session_scope(engine) as s:
-        load_membership_csv(s, f)
-        assert len(s.scalars(select(UniverseMembership)).all()) == 2
+        w = lambda d: {m.symbol: float(m.weight) for m in uni.get_member_records(s, "U1", d)}
+        assert w(D(2024, 3, 1)) == {"AAA": 0.6, "BBB": 0.4}
+        assert w(D(2024, 7, 1)) == {"AAA": 0.5, "BBB": 0.5}
 
 
-def test_reload_can_close_an_open_interval(engine, tmp_path):
+def test_training_wider_than_trading(engine, cfg):
+    cfg2 = cfg.model_copy(update={"universe": cfg.universe.model_copy(update={"training_code": "TRAIN", "trading_code": "TRADE"})})
+    apply(engine, "TRAIN", [f"S{i}" for i in range(8)], D(2024, 1, 1))
+    apply(engine, "TRADE", ["S1", "S2", "S3"], D(2024, 1, 1))
+    apply(engine, "TRADE", ["S1", ("S2", {"status": "suspended"}), "S3"], D(2024, 3, 1))
     with session_scope(engine) as s:
-        load_membership_csv(s, write(tmp_path, "U1,AAA,2023-01-01,\n", "a.csv"))
+        assert len(uni.training_members(s, cfg2, D(2024, 2, 1))) == 8
+        assert [m.symbol for m in uni.trading_members(s, cfg2, D(2024, 2, 1))] == ["S1", "S2", "S3"]
+        assert [m.symbol for m in uni.trading_members(s, cfg2, D(2024, 3, 1))] == ["S1", "S3"]   # suspended: no recommendations
+        assert uni.trading_outside_training(s, cfg2, D(2024, 2, 1)) == []
+
+
+def test_trading_outside_training_is_reported(engine, cfg):
+    cfg2 = cfg.model_copy(update={"universe": cfg.universe.model_copy(update={"training_code": "TRAIN", "trading_code": "TRADE"})})
+    apply(engine, "TRAIN", ["S1", "S2"], D(2024, 1, 1))
+    apply(engine, "TRADE", ["S1", "S9"], D(2024, 1, 1))
     with session_scope(engine) as s:
-        load_membership_csv(s, write(tmp_path, "U1,AAA,2023-01-01,2024-01-01\n", "b.csv"))
-        rows = s.scalars(select(UniverseMembership)).all()
-        assert len(rows) == 1 and rows[0].effective_to == date(2024, 1, 1)
-        assert get_members(s, "U1", date(2024, 1, 1)) == []
+        assert uni.trading_outside_training(s, cfg2, D(2024, 2, 1)) == ["S9"]
 
 
-@pytest.mark.parametrize("body,msg", [
-    ("U1,AAA,2023-01-01,2024-01-01\nU1,AAA,2023-06-01,\n", "overlaps"),      # overlap inside file
-    ("U1,AAA,2023-01-01,\nU1,AAA,2024-01-01,\n", "overlaps"),                # open interval then new one
-    ("U1,AAA,2024-01-01,2023-01-01\n", "must be after"),
-    ("U1,AAA,2024-01-01,2024-01-01\n", "must be after"),
-    ("U1,AAA,not-a-date,\n", "bad date"),
-    ("U1,,2024-01-01,\n", "empty"),
-])
-def test_invalid_membership_rejected_before_writing(engine, tmp_path, body, msg):
+def test_integrity_check_detects_overlaps_and_uncovered_membership(engine):
+    apply(engine, "U1", ["AAA"], D(2024, 1, 1))
+    with engine.begin() as c:   # DML the database itself cannot forbid (no exclusion constraints in MySQL)
+        c.execute(text("INSERT INTO universe_membership (universe_id, instrument_id, valid_from, valid_to, source) "
+                       "SELECT universe_id, instrument_id, '2024-06-01', '2024-09-01', 'bad' FROM universe_membership LIMIT 1"))
+        c.execute(text("INSERT INTO universe_membership (universe_id, instrument_id, valid_from, valid_to, source) "
+                       "SELECT universe_id, instrument_id, '1990-01-01', '1991-01-01', 'bad' FROM universe_membership LIMIT 1"))
     with session_scope(engine) as s:
-        with pytest.raises(MembershipError, match=msg):
-            load_membership_csv(s, write(tmp_path, body))
-        assert s.scalars(select(UniverseMembership)).all() == []
-
-
-def test_overlap_with_rows_already_in_db_is_rejected(engine, tmp_path):
-    with session_scope(engine) as s:
-        load_membership_csv(s, write(tmp_path, "U1,AAA,2023-01-01,2024-01-01\n", "a.csv"))
-    with session_scope(engine) as s:
-        with pytest.raises(MembershipError, match="overlaps"):
-            load_membership_csv(s, write(tmp_path, "U1,AAA,2023-06-01,\n", "b.csv"))
-
-
-def test_missing_columns_and_empty_file(engine, tmp_path):
-    bad = tmp_path / "bad.csv"
-    bad.write_text("universe_code,symbol\nU1,AAA\n")
-    empty = tmp_path / "empty.csv"
-    empty.write_text(HEADER)
-    with session_scope(engine) as s:
-        with pytest.raises(MembershipError, match="missing columns"):
-            load_membership_csv(s, bad)
-        with pytest.raises(MembershipError, match="no data rows"):
-            load_membership_csv(s, empty)
-
-
-def test_comments_blank_lines_and_case_are_handled(engine, tmp_path):
-    p = tmp_path / "c.csv"
-    p.write_text("# provenance note\n" + HEADER + "\nU1, aaa ,2023-01-01,\n")
-    with session_scope(engine) as s:
-        load_membership_csv(s, p)
-        assert get_members(s, "U1", date(2023, 2, 1)) == ["AAA"]
+        problems = uni.check_integrity(s)
+    assert any("membership:" in p and "overlaps" in p for p in problems)
+    assert any("no symbol row covers" in p for p in problems)

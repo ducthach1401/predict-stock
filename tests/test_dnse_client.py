@@ -161,3 +161,48 @@ def test_requests_are_throttled(cfg):
 def test_bad_range_rejected(cfg):
     with pytest.raises(ValueError):
         client(cfg)[0].fetch_daily("X", "stock", date(2025, 2, 1), date(2025, 1, 1))
+
+
+# ---- intraday (1H) -------------------------------------------------------------------------------------
+def test_intraday_bars_are_utc_scaled_and_sorted(cfg):
+    day = datetime(2026, 9, 18)
+    ts = lambda h: int(datetime(2026, 9, 18, h, tzinfo=timezone.utc).timestamp())        # 02:00 UTC = 09:00 ICT
+    with responses.RequestsMock() as rs:
+        rs.get(URL, json=payload([(ts(3), 60.4, 60.9, 60.3, 60.5, 200), (ts(2), 60.3, 60.6, 60.2, 60.4, 100)]),
+               match=[matchers.query_param_matcher({"symbol": "VCB", "resolution": "1H",
+                                                     "from": str(int(datetime(2026, 9, 17, 17, tzinfo=timezone.utc).timestamp())),
+                                                     "to": str(int(datetime(2026, 9, 18, 16, 59, 59, tzinfo=timezone.utc).timestamp()))})])
+        bars = client(cfg)[0].fetch_intraday("VCB", "stock", date(2026, 9, 18), date(2026, 9, 18))
+    assert [b.bar_time for b in bars] == [datetime(2026, 9, 18, 2), datetime(2026, 9, 18, 3)]        # naive UTC, ascending
+    assert (bars[0].open, bars[0].close, bars[0].volume) == (Decimal("60300"), Decimal("60400"), 100)
+
+
+@responses.activate
+def test_intraday_repeated_timestamp_keeps_last_and_warns(cfg):
+    t = int(datetime(2026, 9, 18, 2, tzinfo=timezone.utc).timestamp())
+    responses.get(URL, json=payload([(t, 1, 1, 1, 1, 1), (t, 2, 2, 2, 2, 2)]))
+    c, _ = client(cfg)
+    (bar,) = c.fetch_intraday("X", "stock", date(2026, 9, 18), date(2026, 9, 18))
+    assert bar.close == Decimal("2000") and any("repeated 1H timestamp" in w for w in c.warnings)
+
+
+@responses.activate
+def test_intraday_drops_bars_outside_the_requested_days_and_handles_empty(cfg):
+    inside = int(datetime(2026, 9, 18, 2, tzinfo=timezone.utc).timestamp())
+    outside = int(datetime(2026, 9, 25, 2, tzinfo=timezone.utc).timestamp())
+    responses.get(URL, json=payload([(inside, 1, 1, 1, 1, 1), (outside, 1, 1, 1, 1, 1)]))
+    assert len(client(cfg)[0].fetch_intraday("X", "stock", date(2026, 9, 18), date(2026, 9, 18))) == 1
+    responses.replace(responses.GET, URL, json={"t": []})
+    assert client(cfg)[0].fetch_intraday("X", "stock", date(2026, 9, 18), date(2026, 9, 18)) == []
+
+
+@responses.activate
+def test_intraday_malformed_and_invalid_symbol(cfg):
+    responses.get(URL, json={"t": [1], "o": [1]})
+    with pytest.raises(DnseError, match="malformed"):
+        client(cfg)[0].fetch_intraday("X", "stock", date(2026, 9, 18), date(2026, 9, 18))
+    responses.replace(responses.GET, URL, status=400, json={"message": "invalid symbol"})
+    with pytest.raises(DnseInvalidSymbol):
+        client(cfg)[0].fetch_intraday("ZZ", "stock", date(2026, 9, 18), date(2026, 9, 18))
+    with pytest.raises(ValueError):
+        client(cfg)[0].fetch_intraday("X", "stock", date(2026, 9, 19), date(2026, 9, 18))

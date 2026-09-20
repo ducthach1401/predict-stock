@@ -1,7 +1,7 @@
 # DEMO universe: pipeline fixture only. NOT an index; NOT for performance claims.
-universe_code,symbol,effective_from,effective_to
-DEMO,VCB,2018-01-01,
-DEMO,FPT,2018-01-01,
-DEMO,HPG,2018-01-01,
-DEMO,VNM,2018-01-01,
-DEMO,SSI,2018-01-01,
+symbol,valid_from
+VCB,2018-01-01
+FPT,2018-01-01
+HPG,2018-01-01
+VNM,2018-01-01
+SSI,2018-01-01

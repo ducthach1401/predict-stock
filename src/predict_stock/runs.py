@@ -1,17 +1,20 @@
 """Job-run tracking: config snapshot, seed and git commit for every run (principle 6)."""
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import traceback
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterator
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.orm import Session
 
 from predict_stock.config import PROJECT_ROOT, AppConfig
-from predict_stock.db.models import JobRun
+from predict_stock.db.models import ConfigSnapshot, JobRun
 
 
 def git_state() -> tuple[str | None, bool | None]:
@@ -30,6 +33,19 @@ def git_state() -> tuple[str | None, bool | None]:
         return None, None
 
 
+def config_sha256(snapshot: dict) -> str:
+    canon = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def save_config_snapshot(session: Session, snapshot: dict) -> int:
+    """Idempotently store a config snapshot (deduplicated by sha256); returns its id."""
+    sha = config_sha256(snapshot)
+    stmt = mysql_insert(ConfigSnapshot).values(sha256=sha, content=snapshot)
+    session.execute(stmt.on_duplicate_key_update(id=ConfigSnapshot.id))
+    return session.scalar(select(ConfigSnapshot.id).where(ConfigSnapshot.sha256 == sha))
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -46,7 +62,7 @@ def tracked_run(engine: Engine, job_name: str, cfg: AppConfig, params: dict | No
             git_commit=commit,
             git_dirty=dirty,
             seed=cfg.seed,
-            config_snapshot=cfg.snapshot(),
+            config_snapshot_id=save_config_snapshot(s, cfg.snapshot()),
             params=params,
         )
         s.add(run)

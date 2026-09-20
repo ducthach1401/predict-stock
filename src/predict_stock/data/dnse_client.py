@@ -47,6 +47,16 @@ class DnseInvalidSymbol(DnseError):
 
 
 @dataclass(frozen=True)
+class IntradayBar:
+    bar_time: datetime  # start of the bar, UTC, naive
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+
+
+@dataclass(frozen=True)
 class DailyBar:
     trade_date: date
     open: Decimal
@@ -91,6 +101,37 @@ class DnseClient:
         )
         bars = self._parse(payload, symbol, kind)
         return [b for b in bars if start <= b.trade_date <= end]
+
+    def fetch_intraday(self, symbol: str, kind: Kind, start: date, end: date, resolution: str = "1H") -> list[IntradayBar]:
+        """Intraday bars whose Vietnam-local date is within [start, end], ascending, one per timestamp.
+        Assumption (probed 2026-09-20): a 1H bar's ``t`` is its start (09:00, 10:00, 11:00, 13:00, 14:00
+        ICT); a repeated timestamp keeps the last row and is reported in ``warnings``."""
+        if end < start:
+            raise ValueError(f"end {end} before start {start}")
+        payload = self._get_json(
+            f"{self.cfg.base_url}/{kind}",
+            {"symbol": symbol, "resolution": resolution, "from": self._epoch(start, dtime(0, 0)), "to": self._epoch(end, dtime(23, 59, 59))},
+            symbol,
+        )
+        keys = ("t", "o", "h", "l", "c", "v")
+        if not payload or not payload.get("t"):
+            return []
+        if any(k not in payload for k in keys) or any(len(payload[k]) != len(payload["t"]) for k in keys):
+            raise DnseError(f"{symbol}: malformed intraday response")
+        mult = Decimal(self.cfg.price_multiplier_stock if kind == "stock" else self.cfg.price_multiplier_index)
+        out: dict[datetime, IntradayBar] = {}
+        for i in sorted(range(len(payload["t"])), key=lambda k: payload["t"][k]):
+            ts = datetime.fromtimestamp(int(payload["t"][i]), tz=timezone.utc)
+            if not (start <= ts.astimezone(self._tz).date() <= end):
+                continue
+            key = ts.replace(tzinfo=None)
+            if key in out:
+                msg = f"{symbol}: repeated {resolution} timestamp {key} (kept the last row)"
+                log.warning(msg)
+                self.warnings.append(msg)
+            out[key] = IntradayBar(key, Decimal(payload["o"][i]) * mult, Decimal(payload["h"][i]) * mult,
+                                   Decimal(payload["l"][i]) * mult, Decimal(payload["c"][i]) * mult, int(payload["v"][i]))
+        return [out[k] for k in sorted(out)]
 
     # ---- internals --------------------------------------------------------
     def _epoch(self, d: date, t: dtime) -> int:

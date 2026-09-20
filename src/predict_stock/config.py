@@ -55,13 +55,40 @@ class DnseConfig(_Strict):
     bar_timezone: str = "Asia/Ho_Chi_Minh"
 
 
+class UniverseConfig(_Strict):
+    """Which universe plays which role. Codes are data: any universe loaded via
+    `universe apply` can be named here. Training is normally wider than trading."""
+
+    training_code: str  # the model learns from these instruments
+    trading_code: str  # only these may receive recommendations
+    history_floor: str = "2000-01-01"  # symbol history of instruments with unknown listing date starts here
+
+    def floor(self):
+        from datetime import date
+        return date.fromisoformat(self.history_floor)
+
+
+class IntradayConfig(_Strict):
+    """Optional intraday bars. DNSE served 1H bars only from 2023-09-21 when probed."""
+
+    enabled: bool = False
+    resolution: str = "1H"
+    history_start: str = "2023-09-01"
+    overlap_calendar_days: int = 5
+
+
 class IngestConfig(_Strict):
     history_start: str = "2018-01-01"
     overlap_calendar_days: int = 21
     adjust_rel_tolerance: float = 0.0005
     session_close_time: str = "15:00"
     final_bar_buffer_minutes: int = 15
+    min_sessions: int = 500  # daily sessions an instrument needs before it is usable for training
+    auto_backfill: bool = True  # `universe apply` backfills newly added instruments
+    intraday: IntradayConfig = Field(default_factory=IntradayConfig)
+    calendar_code: str = "VN_CONSENSUS"
     calendar_min_stock_fraction: float = 0.5
+    calendar_grace_days: int = 30  # a stock stays 'active' this long after its last bar
     benchmark_symbols: list[str] = Field(default_factory=lambda: ["VNINDEX"])
 
     def close_time(self) -> time:
@@ -71,14 +98,30 @@ class IngestConfig(_Strict):
 
 class QualityConfig(_Strict):
     big_move_tolerance: float = 0.01
+    return_outlier_z: float = 8.0  # robust z (median/MAD) of daily log returns
+    volume_spike_ratio: float = 30.0  # volume / median of the previous `volume_spike_window` sessions
+    volume_spike_window: int = 60
+    price_range_vnd: tuple[float, float] = (500.0, 5_000_000.0)  # plausible stock price, VND
+    unit_jump_ratio: float = 100.0  # day-over-day ratio beyond this (either way) = probable unit change
+    report_path: str = "docs/DATA_QUALITY.md"
+    known_issues_path: str = "data/quality_known_issues.csv"
+
+
+class AdjustmentConfig(_Strict):
+    """Detection of unadjusted corporate actions. Candidates are only ever reported."""
+
+    gap_tolerance: float = 0.01  # open/prev_close gap beyond (price band + this) = candidate
+    detect_max_band: bool = True  # unknown exchange history: use the widest configured band
 
 
 class AppConfig(_Strict):
     seed: int = 42
     market: MarketConfig = Field(default_factory=MarketConfig)
     dnse: DnseConfig
+    universe: UniverseConfig
     ingest: IngestConfig = Field(default_factory=IngestConfig)
     quality: QualityConfig = Field(default_factory=QualityConfig)
+    adjustments: AdjustmentConfig = Field(default_factory=AdjustmentConfig)
 
     def snapshot(self) -> dict:
         """JSON-serialisable copy for job_runs.config_snapshot (contains no secrets)."""
