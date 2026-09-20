@@ -84,3 +84,18 @@ quality:
 adjustments:
   gap_tolerance: 0.01           # open/prev_close gap beyond (band + this) = corporate-action candidate
   detect_max_band: true         # exchange history unknown -> widest band (UPCoM 15%): only large events are visible
+
+# ---- Features / datasets (Phase 3) ---------------------------------------------------------------
+features:
+  definitions_path: config/feature_sets.yaml
+  benchmark_symbol: VN30          # DNSE has VN30 only from 2020-05-11: relative strength / downside beta are NaN before that
+  benchmark_fallback_symbol: null # e.g. VNINDEX to fill 2018-2020 (rescaled to agree on the first VN30 date); off by default
+  benchmark_ffill_limit: 5
+  fundamentals:
+    enabled: false                # price data only; a FundamentalProvider can be plugged in later
+
+datasets:
+  dir: artifacts/datasets
+  audit_lookahead: true           # every build proves features do not use data after t
+  audit_cuts: 3
+  require_ready: true             # instruments blocked for insufficient history at the end date are left out

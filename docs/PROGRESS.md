@@ -151,3 +151,65 @@ python -m predict_stock quality known-issues --file data/quality_known_issues.cs
 python -m predict_stock adjustments detect | apply --file confirmed.csv | set-basis --symbol X --basis raw
 python -m predict_stock backfill | calendar gaps | ingest --intraday
 ```
+
+## Phase 3 — Features, labels, datasets  ·  acceptance met (2026-09-20), uncommitted
+
+Details, catalogue and rules: [docs/FEATURES.md](FEATURES.md).
+
+### Acceptance
+
+| Criterion | Evidence |
+|---|---|
+| Feature at t does not use data after t (cut the future, features unchanged) | `tests/test_lookahead.py`: all shipped sets (`swing:1`, `invest:1`, `invest:2`) x 3 random panels with gaps and membership changes x 7 cut dates: every value at or before the cut identical after removing the future. Also whole dataset rows (`assemble_frame`) at 3 cuts, and "appending future bars does not change history". **The audit is itself tested**: 7 deliberate time-series leaks and 2 cross-sectional leaks are all caught, a clean control passes, and a label that looks past its declared horizon is caught. Every real build re-runs the audit (manifest: `lookahead_audit.passed`) |
+| Same config → same dataset hash | Real data: SWING `sha256 6ec43485…` and INVEST `e2019b08…`; a rebuild into a different name/file (and, in tests, after deleting the row and the file) gives the **same sha256, content hash and inputs hash**. A second `dataset build` prints `REUSED`, writes nothing, adds no row. Changed input data → version 2, version 1 kept |
+| New member mid-period and removed member | `tests/test_membership_features.py` + `tests/test_dataset.py`: a joiner has no rows before `valid_from` and full features on day one (history from before it joined); ranks before it joins equal those of a universe in which it never existed; a removed stock stops on `valid_to - 1`, its ranks vanish after, yet its last rows are labelled with prices after removal and it still counts in the label ranks of that day. Also delisted (no bars), suspended sessions, new listing (warm-up), and, in the dataset, `ret_5_csrank` equals the percentile rank recomputed from that day's rows |
+
+Suite: **334 tests** pass (+ 4 live), of which 138 are new in this phase.
+
+### What was built
+
+1. **Registry** — plugin classes registered by decorator under `(name, version)`; sets/specs are YAML data pinned to versions and stored in `feature_sets` / `label_specs` (immutable per version).
+   Adding a feature needs **no schema change** (a test compares `SHOW TABLES` before and after). Identifier-like column names are rejected.
+2. **SWING features** (10 plugins + ranks), **INVEST features** (6 plugins), `FundamentalProvider` interface (off; a set that needs it fails loudly).
+3. **Labels** — `fwd_rank_return` (3/5 for SWING, 21/63/126 for INVEST) and `triple_barrier` (ATR barriers, time barrier, time-to-touch, end date). Every case (target, stop, both on one day, gap-through, time-out, suspension, incomplete window) has a test.
+4. **Cross-sectional ranks** only over the members on that date; no id/symbol feature (registry + dataset tests).
+5. **`build_dataset`** — Parquet + manifest in `datasets` (universe, dates, feature set, label spec, hash, path) + config snapshot + git commit; CLI `features list|sync`, `dataset build|list|verify`, `make datasets`.
+
+### Real data (LARGE50, 2018-01-02 → 2026-09-18)
+
+| dataset | rows | instruments | first → last decision date | features | label columns | build |
+|---|---|---|---|---|---|---|
+| `LARGE50__swing1__swing1` | 105,633 | 50 | 2018-02-28 → 2026-09-18 | 23 | 10 | 12 s (incl. audit) |
+| `LARGE50__invest2__invest1` | 93,683 | 50 | 2019-02-13 → 2026-09-18 | 16 | 9 | 9 s (incl. audit) |
+
+* Policies applied: 62 defective stock bars repaired (exactly the Phase 2 count), 10 off-calendar bars dropped.
+* NaN: `rs_5/rs_10` 26% and `dbeta_126` 18% (VN30 exists only from 2020-05-11); labels are NaN only where the window does not fit. The last 5 (SWING) / 126 (INVEST) sessions have unknown labels by design.
+* SWING triple barrier: −1 55%, 0 15%, +1 30% (target 2 ATR is farther than stop 1 ATR; this is not a prediction target balance, do not read it as skill).
+* Smoke test for leakage on the real data (mean daily rank IC of each feature against the forward-return rank; **not** a claim of predictive power): SWING max |IC| 0.043 (short-term reversal shows as small negative IC on `ret_1..3`); INVEST `invest:2` max |IC| 0.060 (`mom_12m` vs 126-session rank).
+
+### A leak the audit could not see, found by that smoke test
+
+The first INVEST set had `liq_logvalue_60` (log median close × volume). Its IC against the 63-session rank was **−0.108**, three times the next feature. The cause is
+structural: DNSE prices are back-adjusted for corporate actions that happen *after* the date, so a price **level** at t carries information about the future
+(the audit cannot see it: the adjusted series is one download). `liquidity` v2 uses ratios only (`liq_trend_60_252`); `invest:1` is kept in the YAML marked deprecated
+(versions are immutable), its dataset was deleted, and `invest:2` is the shipped set. Consequence: the cross-sectional level of liquidity is not offered.
+`liq_zero_share_60` is constantly 0 in this universe of large caps (no information here; it may matter for less liquid universes).
+
+### Limits and assumptions
+
+* **Not point-in-time by nature of the data:** back-adjusted price levels (only ratios are used), and the volume-adjustment status is unknown.
+* The audit proves absence of look-ahead **inside the feature code**, not in the data. A fundamentals provider that ignores `as_of` would not be caught (there is none yet).
+* Labels enter at the **close of the decision date**; realistic execution (next open, T+2, price limits, fees, slippage) is Phase 4's job.
+* Rows with `rs_*` / `dbeta_*` NaN before 2020-05-11: set `features.benchmark_fallback_symbol: VNINDEX` to fill them (rescaled at the splice); off by default because it mixes two indices.
+* 50 stocks × ~2,100 sessions is a small sample: ranks over 50 names are coarse, and overlapping forward windows make consecutive labels highly correlated (the `*_end` columns exist so Phase 4 can purge/embargo).
+* The universe is LARGE50 as of today applied backwards (Phase 1 caveat): labels and ranks over it are optimistic.
+* Dataset files live in `artifacts/datasets/` (git-ignored); the DB holds path, sha256 and manifest, never the data.
+
+### How to run
+```bash
+make datasets                                   # features sync + build swing:1 and invest:2 (REUSED when nothing changed)
+python -m predict_stock features list           # plugins, sets, warm-ups
+python -m predict_stock dataset list | verify --name LARGE50__swing1__swing1
+python -m predict_stock dataset build --feature-set swing:1 --label-spec swing:1 --start 2020-01-01 --data-cutoff 2025-12-31
+```
+

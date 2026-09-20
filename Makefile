@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 ALEMBIC ?= .venv/bin/alembic
 EFFECTIVE_DATE ?= $(shell date +%F)
 
-.PHONY: setup db-up migrate universe data backfill quality test test-live
+.PHONY: setup db-up migrate universe data backfill quality features datasets test test-live
 
 setup: db-up migrate universe
 
@@ -28,6 +28,15 @@ backfill:
 
 quality:
 	$(PY) -m predict_stock quality run --details 20
+
+# Phase 3: store the feature sets / label specs, then build (or reproduce) the datasets. Identical inputs -> identical
+# files: a second run reports REUSED. Each build proves the features do not use data after t (look-ahead audit).
+features:
+	$(PY) -m predict_stock features sync
+
+datasets: features
+	$(PY) -m predict_stock dataset build --feature-set swing:1  --label-spec swing:1
+	$(PY) -m predict_stock dataset build --feature-set invest:2 --label-spec invest:1
 
 test:
 	$(PY) -m pytest

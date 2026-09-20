@@ -1,0 +1,58 @@
+# Keys are name:version. Feature sets and label specs: DATA that pins (feature name, version, params). Adding a feature = new class in
+# src/predict_stock/features/; using it = a new set (or a new version of a set) here. A stored version never changes.
+# `python -m predict_stock features sync` copies this file into the feature_sets / label_specs tables.
+
+feature_sets:
+  "swing:1":
+    version: 1
+    description: "SWING (hold 3-15 sessions): short-horizon returns, oscillators, volatility, breakout, volume, relative strength vs the benchmark, cross-sectional ranks."
+    features:
+      - {name: ret,            version: 1, params: {windows: [1, 2, 3, 5, 10]}}
+      - {name: rsi,            version: 1, params: {window: 14}}
+      - {name: macd,           version: 1, params: {fast: 12, slow: 26, signal: 9}}
+      - {name: atr,            version: 1, params: {window: 14}}
+      - {name: bollinger_pctb, version: 1, params: {window: 20, k: 2.0}}
+      - {name: donchian,       version: 1, params: {window: 20}}
+      - {name: zscore,         version: 1, params: {window: 20}}
+      - {name: gap,            version: 1}
+      - {name: volume_spike,   version: 1, params: {window: 20}}
+      - {name: rel_strength,   version: 1, params: {windows: [5, 10]}}
+      - {name: cs_rank,        version: 1, params: {inputs: [ret_5, ret_10, rsi_14, zscore_20, vol_spike_20, rs_5], min_count: 5}}
+
+  "invest:1":
+    version: 1
+    description: "DEPRECATED - use invest:2. Contains liquidity v1 (liq_logvalue_60), a price-LEVEL feature that is not point-in-time with back-adjusted prices. Kept only because it was built once."
+    features:
+      - {name: momentum_skip, version: 1, params: {months: [3, 6, 12], skip: 21, days_per_month: 21}}
+      - {name: volatility,    version: 1, params: {windows: [63, 126], annualize: 252}}
+      - {name: downside_beta, version: 1, params: {window: 126, min_obs: 20}}
+      - {name: drawdown,      version: 1, params: {window: 252}}
+      - {name: sma_ratio,     version: 1, params: {window: 200}}
+      - {name: liquidity,     version: 1, params: {window: 60}}
+      - {name: cs_rank,       version: 1, params: {inputs: [mom_6m, mom_12m, vol_126, dd_252, sma_ratio_200], min_count: 5}}
+
+  "invest:2":
+    version: 2
+    description: "INVEST (1-12+ months): momentum skipping the last month, volatility, downside beta vs the benchmark, drawdown, price vs SMA200, scale-free liquidity, cross-sectional ranks. Price data only."
+    features:
+      - {name: momentum_skip, version: 1, params: {months: [3, 6, 12], skip: 21, days_per_month: 21}}
+      - {name: volatility,    version: 1, params: {windows: [63, 126], annualize: 252}}
+      - {name: downside_beta, version: 1, params: {window: 126, min_obs: 20}}
+      - {name: drawdown,      version: 1, params: {window: 252}}
+      - {name: sma_ratio,     version: 1, params: {window: 200}}
+      - {name: liquidity,     version: 2, params: {short: 60, long: 252}}
+      - {name: cs_rank,       version: 1, params: {inputs: [mom_6m, mom_12m, vol_126, dd_252, sma_ratio_200, liq_trend_60_252], min_count: 5}}
+
+label_specs:
+  "swing:1":
+    version: 1
+    description: "SWING: forward return rank over 3 and 5 sessions + triple barrier (target 2 ATR, stop 1 ATR, 10 sessions)."
+    labels:
+      - {name: fwd_rank_return, version: 1, params: {horizons: [3, 5], min_count: 5}}
+      - {name: triple_barrier,  version: 1, params: {horizon: 10, atr_window: 14, target_mult: 2.0, stop_mult: 1.0}}
+
+  "invest:1":
+    version: 1
+    description: "INVEST: forward return rank over 21, 63 and 126 sessions."
+    labels:
+      - {name: fwd_rank_return, version: 1, params: {horizons: [21, 63, 126], min_count: 5}}

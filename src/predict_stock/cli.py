@@ -31,6 +31,9 @@ from predict_stock.db.models import Universe
 from predict_stock.db.repo import find_symbol_row
 from predict_stock.db.session import make_engine, session_scope
 from predict_stock.pipeline import run_data_pipeline, run_quality
+from predict_stock.features import registry as freg
+from predict_stock.features.dataset import DatasetError, build_dataset, file_sha256, load_dataset
+from predict_stock.features.sets import load_definitions, sync_definitions
 from predict_stock.instruments import EXCHANGES, STATUSES, change_exchange, rename_symbol, set_status
 from predict_stock.runs import tracked_run
 from predict_stock.universe_sync import SnapshotError, apply_snapshot, read_snapshot_csv
@@ -82,6 +85,23 @@ def build_parser() -> argparse.ArgumentParser:
     s = i.add_parser("status", help="suspension / delisting (tạm dừng / hủy niêm yết)")
     s.add_argument("--symbol", required=True); s.add_argument("--status", required=True, choices=STATUSES)
     s.add_argument("--effective-date", required=True, type=_d); s.add_argument("--note")
+
+    # ---- features / datasets
+    ft = sub.add_parser("features", help="feature / label registry").add_subparsers(dest="cmd", required=True)
+    ft.add_parser("list", help="registered plugins and the feature sets / label specs in config/feature_sets.yaml")
+    ft.add_parser("sync", help="store feature sets and label specs in the database (idempotent; versions are immutable)")
+    ds = sub.add_parser("dataset", help="feature+label datasets").add_subparsers(dest="cmd", required=True)
+    bd = ds.add_parser("build", help="build (or reproduce) a Parquet dataset and register its manifest")
+    bd.add_argument("--feature-set", required=True, help="name:version, e.g. swing:1")
+    bd.add_argument("--label-spec", required=True, help="name:version, e.g. swing:1")
+    bd.add_argument("--universe", help="default: universe.training_code")
+    bd.add_argument("--start", type=_d, help="first decision date (default: ingest.history_start)")
+    bd.add_argument("--end", type=_d, help="last decision date (default: today)")
+    bd.add_argument("--data-cutoff", type=_d, help="latest data labels may use (default: latest trading day)")
+    bd.add_argument("--name")
+    ds.add_parser("list", help="registered datasets")
+    vd = ds.add_parser("verify", help="check a dataset's file against its recorded sha256")
+    vd.add_argument("--name", required=True); vd.add_argument("--version", type=int)
 
     # ---- data jobs
     def window(sp, refetch=False):
@@ -135,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
         return _instrument(args, cfg, engine)
     if args.group == "adjustments":
         return _adjustments(args, cfg, engine)
+    if args.group in ("features", "dataset"):
+        return _features_datasets(args, cfg, engine)
     if args.group == "calendar":
         with session_scope(engine) as s:
             if args.cmd == "sync":
@@ -176,6 +198,50 @@ def main(argv: list[str] | None = None) -> int:
         for line in q["unexplained_errors"][: getattr(args, "details", 0) or 10]:
             print("  UNEXPLAINED", line)
         return 0 if res["ok"] else 1
+    return 0
+
+
+def _pair(text: str) -> tuple[str, int]:
+    name, _, version = text.partition(":")
+    return name, int(version or 1)
+
+
+def _features_datasets(args, cfg: AppConfig, engine) -> int:
+    from predict_stock.db.models import Dataset
+    try:
+        if args.group == "features":
+            fsets, lspecs = load_definitions(PROJECT_ROOT / cfg.features.definitions_path)
+            if args.cmd == "list":
+                print("registered feature plugins (name, version, kind, group):")
+                for row in freg.list_features():
+                    print("  ", *row)
+                print("registered label plugins:", ", ".join(f"{n} v{v}" for n, v in freg.list_labels()))
+                for (n, v), spec in sorted(fsets.items()):
+                    print(f"feature set {n}:{v}  {len(spec.columns())} columns  warm-up {max(f.warmup() for f in spec.instantiate())} sessions")
+                for (n, v), spec in sorted(lspecs.items()):
+                    print(f"label spec  {n}:{v}  horizon {spec.horizon()}  columns {len(spec.columns())}")
+            else:
+                with session_scope(engine) as s:
+                    print(sync_definitions(s, fsets, lspecs))
+            return 0
+        if args.cmd == "build":
+            res = build_dataset(engine, cfg, universe_code=args.universe, feature_set=_pair(args.feature_set), label_spec=_pair(args.label_spec),
+                                start=args.start or _d(cfg.ingest.history_start), end=args.end or date.today(), data_cutoff=args.data_cutoff, name=args.name)
+            m = res.manifest
+            print(f"{'REUSED (identical)' if res.reused else 'BUILT'} {res.name} v{res.version}: {res.rows:,} rows, {m['instruments']} instruments, "
+                  f"{m['first_date']} → {m['last_date']}, {len(m['feature_columns'])} features, {len(m['label_columns'])} label columns")
+            print(f"  file {res.path}\n  sha256 {res.sha256}\n  content {res.content_hash}\n  look-ahead audit: {'passed' if (m.get('lookahead_audit') or {}).get('passed') else m.get('lookahead_audit')}")
+        elif args.cmd == "list":
+            with session_scope(engine) as s:
+                for d in s.scalars(select(Dataset).order_by(Dataset.name, Dataset.version)):
+                    print(f"{d.name} v{d.version}: {d.row_count:,} rows {d.start_date}→{d.end_date} {d.path} {d.sha256[:12]}")
+        else:
+            with session_scope(engine) as s:
+                frame, manifest = load_dataset(s, args.name, args.version)   # raises if the sha256 does not match
+            print(f"{args.name}: OK, {len(frame):,} rows, sha256 verified")
+    except (DatasetError, freg.RegistryError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

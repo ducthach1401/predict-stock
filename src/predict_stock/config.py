@@ -114,6 +114,25 @@ class AdjustmentConfig(_Strict):
     detect_max_band: bool = True  # unknown exchange history: use the widest configured band
 
 
+class FundamentalsConfig(_Strict):
+    enabled: bool = False  # DNSE's public endpoint has no fundamentals; strategies must run on prices alone
+
+
+class FeaturesConfig(_Strict):
+    definitions_path: str = "config/feature_sets.yaml"
+    benchmark_symbol: str | None = "VN30"  # relative strength / downside beta reference
+    benchmark_fallback_symbol: str | None = None  # e.g. VNINDEX: used only before the primary exists (VN30 starts 2020-05-11)
+    benchmark_ffill_limit: int = 5  # sessions a benchmark value may be carried forward over its own gaps
+    fundamentals: FundamentalsConfig = Field(default_factory=FundamentalsConfig)
+
+
+class DatasetConfig(_Strict):
+    dir: str = "artifacts/datasets"
+    audit_lookahead: bool = True  # prove, on every build, that features do not use data after t
+    audit_cuts: int = 3
+    require_ready: bool = True  # skip instruments blocked for insufficient history (ingest.min_sessions) at the end date
+
+
 class AppConfig(_Strict):
     seed: int = 42
     market: MarketConfig = Field(default_factory=MarketConfig)
@@ -122,6 +141,8 @@ class AppConfig(_Strict):
     ingest: IngestConfig = Field(default_factory=IngestConfig)
     quality: QualityConfig = Field(default_factory=QualityConfig)
     adjustments: AdjustmentConfig = Field(default_factory=AdjustmentConfig)
+    features: FeaturesConfig = Field(default_factory=FeaturesConfig)
+    datasets: DatasetConfig = Field(default_factory=DatasetConfig)
 
     def snapshot(self) -> dict:
         """JSON-serialisable copy for job_runs.config_snapshot (contains no secrets)."""
