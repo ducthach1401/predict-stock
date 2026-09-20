@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 ALEMBIC ?= .venv/bin/alembic
 EFFECTIVE_DATE ?= $(shell date +%F)
 
-.PHONY: setup db-up migrate universe data backfill quality features datasets backtest swing invest reco test test-live
+.PHONY: setup db-up migrate universe data backfill quality features datasets backtest swing invest reco paper backup restore-test crontab test test-live
 
 setup: db-up migrate universe
 
@@ -57,6 +57,19 @@ invest: datasets
 reco:
 	$(PY) -m predict_stock reco generate
 	$(PY) -m predict_stock reco backtest
+
+# Phase 8: the daily paper-trading job (paper mode only), backup with retention, restore test, cron entries (printed, not installed).
+paper:
+	$(PY) -m predict_stock paper run
+
+backup:
+	$(PY) -m predict_stock paper backup --prune
+
+restore-test:
+	$(PY) -m predict_stock paper restore-test
+
+crontab:
+	$(PY) -m predict_stock paper crontab
 
 test:
 	$(PY) -m pytest

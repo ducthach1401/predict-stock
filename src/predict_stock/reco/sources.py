@@ -233,6 +233,8 @@ def load_invest_history(engine: Engine, cfg: AppConfig, setup: Setup, key: str) 
     preset, cand = iv.presets[key], cfg.reco.card_model[key]
     frame = IW.prepare(setup.frames["invest"], preset)
     folds = IW.plan_folds(frame, iv, preset, setup.holdout.start)
+    if not folds:
+        raise LookupError(f"invest {key}: no walk-forward fold fits inside the development data")
     rank, ret, end = IW.targets(preset)
     keep = ["trade_date", "instrument_id", rank, ret, end, "mom_6m_csrank", "dd_252", "sma_ratio_200", "mom_6m", "mom_12m", "vol_126"]
     preds, models = [], {}

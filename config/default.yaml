@@ -235,3 +235,27 @@ reco:
   kill_switch: true
   report_path: docs/RECOMMENDATIONS.md
   artifacts_dir: artifacts/reco
+
+# ---- Paper trading and operations (Phase 8) ---------------------------------------------------------------
+run:
+  mode: paper                   # backtest | paper. NO live mode exists: no code here places a real order.
+paper:
+  portfolio_code: paper
+  start_date: null              # set by `python -m predict_stock paper init`
+  universe_snapshot: null       # e.g. data/universe/large50_current.csv: applied every run (no-op when unchanged)
+  on_removal: {swing: hold_until_exit, invest: next_rebalance}     # a stock that leaves the universe is NOT sold in a hurry
+  stop_on_quality_error: true
+  stale_days: 4
+  min_share_with_bar: 0.90
+  pending_min_sessions: 5
+  report_dir: reports/paper
+  report_formats: [md, html, csv]
+  notify: {telegram: false, email: false, only_on_alerts_or_cards: false}     # credentials only from the environment
+  schedule_time: "16:30"
+  schedule_days: "1-5"
+backup:
+  dir: backups
+  daily_keep: 14
+  weekly_keep: 8
+  restore_database: predict_stock_restore
+  compress: true

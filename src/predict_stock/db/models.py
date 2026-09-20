@@ -579,6 +579,7 @@ class Recommendation(Base):
     valid_until: Mapped[date | None] = mapped_column(Date)  # last session on which the order may still be placed
     card: Mapped[dict | None] = mapped_column(JSON)  # the full structured card
     card_text: Mapped[str | None] = mapped_column(Text)  # the Vietnamese text of the card
+    flags: Mapped[dict | None] = mapped_column(JSON)  # e.g. {"left_universe": "2026-09-21"}: the stock left the universe while the recommendation was open
 
 
 class RecommendationOutcome(Base):
@@ -620,6 +621,7 @@ class PaperOrder(Base):
     reject_reason: Mapped[str | None] = mapped_column(String(255))
     run_id: Mapped[int | None] = mapped_column(BigPK, ForeignKey("job_runs.id"))
     created_at: Mapped[datetime] = _created()
+    order_key: Mapped[str | None] = mapped_column(String(160), unique=True)  # idempotency key: the same order is updated, never duplicated
 
 
 class PaperPosition(Base):
@@ -639,6 +641,26 @@ class PaperPosition(Base):
     closed_date: Mapped[date | None] = mapped_column(Date)
     close_price: Mapped[float | None] = mapped_column(PRICE)
     status: Mapped[str] = mapped_column(String(8), server_default="open")
+    created_at: Mapped[datetime] = _created()
+
+
+class SleeveTarget(Base):
+    """The target book of an INVEST sleeve after each rebalance / tranche / forced exit: what the sleeve holds by design (weights of total capital).
+    The paper portfolio is replayed from the recommendations and these rows, so it is reproducible."""
+
+    __tablename__ = "sleeve_targets"
+    __table_args__ = (UniqueConstraint("sleeve", "as_of_date", "kind", "tranche_n", name="uq_sleeve_target"), TABLE_OPTS)
+
+    id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
+    sleeve: Mapped[str] = mapped_column(String(16))
+    as_of_date: Mapped[date] = mapped_column(Date)
+    kind: Mapped[str] = mapped_column(String(12))  # rebalance | tranche | exit
+    tranche_n: Mapped[int] = mapped_column(Integer, server_default="1")
+    tranches_total: Mapped[int] = mapped_column(Integer, server_default="1")
+    target: Mapped[dict | None] = mapped_column(JSON)  # {instrument_id: final weight}
+    current: Mapped[dict] = mapped_column(JSON)  # {instrument_id: weight after this step}
+    next_review: Mapped[date | None] = mapped_column(Date)
+    run_id: Mapped[int | None] = mapped_column(BigPK, ForeignKey("job_runs.id"))
     created_at: Mapped[datetime] = _created()
 
 

@@ -99,6 +99,12 @@ class Card:
     def to_dict(self) -> dict:
         return clean(asdict(self))
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Card":
+        """The card as it was issued (from its stored JSON): the paper portfolio replays exactly this, never a regenerated one."""
+        names = {f for f in cls.__dataclass_fields__}
+        return cls(**{k: v for k, v in d.items() if k in names})
+
     def to_json(self, indent: int | None = 1) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent, sort_keys=False)
 

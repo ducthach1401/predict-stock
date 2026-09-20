@@ -167,13 +167,16 @@ def test_buy_and_watch_cards_are_stored_in_recommendations_idempotently_with_the
     card.instrument_id = iid
     card.model_id = None
     assert save_live_cards(engine, cfg, [card], pd.DataFrame(), 0, None, None) == 1
-    assert save_live_cards(engine, cfg, [card], pd.DataFrame(), 0, None, None) == 1
+    assert save_live_cards(engine, cfg, [card], pd.DataFrame(), 0, None, None) == 0                 # already stored: left exactly as issued
+    with engine.connect() as conn:
+        first_id = conn.execute(select(Recommendation.id)).scalar()
+    assert save_live_cards(engine, cfg, [card], pd.DataFrame(), 0, None, None, overwrite=True) == 1   # explicit overwrite updates in place
     with engine.connect() as conn:
         rows = conn.execute(select(Recommendation)).all()
-    assert len(rows) == 1
+    assert len(rows) == 1 and rows[0].id == first_id
     r = rows[0]
     assert r.strategy == "SWING" and r.action == "BUY" and r.entry_price == card.exits["reference"] and r.target_price == card.exits["target2"] and r.stop_loss == card.exits["stop"]
-    assert r.hold_days_min == 2 and r.hold_days_max == 10 and str(r.valid_until) == card.valid_until and r.status == "open"
+    assert r.hold_days_min == 2 and r.hold_days_max == 10 and str(r.valid_until) == card.valid_until and r.status == "pending"
     assert r.card["exits"]["stop"] == card.exits["stop"] and "GIÁ VÀO LỆNH" in r.card_text and "LÝ DO" in r.rationale and "RỦI RO" in r.rationale and "MẤT HIỆU LỰC" in r.rationale
     assert r.exit_conditions["stop_is_hard"] is True and 0 <= r.confidence <= 1
 

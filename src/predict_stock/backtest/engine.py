@@ -189,7 +189,8 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
 
     def log_order(o: _Order, status: str, i: int | None, reason: str = ""):
         orders_log.append({"order_id": o.oid, "instrument_id": ids[o.j], "side": o.side, "kind": o.kind, "created": cal[o.created],
-                           "executed": cal[i] if i is not None else pd.NaT, "status": status, "reason": reason or o.reason, "tag": o.tag})
+                           "executed": cal[i] if i is not None else pd.NaT, "status": status, "reason": reason or o.reason, "tag": o.tag,
+                           "value": o.value, "qty": o.qty, "limit": o.limit, "valid_until_idx": o.last})
 
     def band_prices(i: int, j: int) -> tuple[float, float]:
         ref = last_close[j]                                              # the last traded close before this session
@@ -197,7 +198,7 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
             return np.inf, 0.0
         return float(rules.ceiling(ref, B[i, j])), float(rules.floor(ref, B[i, j]))
 
-    def record_fill(i: int, j: int, side: str, qty: int, price: float, ref: float, reason: str, kind: str, tag: str | None = None):
+    def record_fill(i: int, j: int, side: str, qty: int, price: float, ref: float, reason: str, kind: str, tag: str | None = None, oid_: int | None = None):
         nonlocal cash
         value = qty * price
         if side == "buy":
@@ -208,7 +209,7 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
             cash += value - f - tax
         adverse = (price - ref) if side == "buy" else (ref - price)       # against you > 0; a limit fill better than the open < 0
         fills.append({"date": cal[i], "idx": i, "instrument_id": ids[j], "side": side, "qty": qty, "price": price, "ref_price": ref,
-                      "value": value, "fee": f, "tax": tax, "slippage_cost": adverse * qty, "reason": reason, "kind": kind, "tag": tag})
+                      "value": value, "fee": f, "tax": tax, "slippage_cost": adverse * qty, "reason": reason, "kind": kind, "tag": tag, "order_id": oid_})
         return value, f, tax
 
     def close_position(i: int, j: int, p: _Pos, reason: str):
@@ -220,9 +221,9 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
                       "avg_entry": p.buy_gross / p.bought_qty if p.bought_qty else np.nan, "qty": p.bought_qty})
         del pos[j]
 
-    def exec_sell(i: int, j: int, qty: int, price: float, ref: float, reason: str, kind: str):
+    def exec_sell(i: int, j: int, qty: int, price: float, ref: float, reason: str, kind: str, oid_: int | None = None):
         p = pos[j]
-        value, f, tax = record_fill(i, j, "sell", qty, price, ref, reason, kind, p.tag)
+        value, f, tax = record_fill(i, j, "sell", qty, price, ref, reason, kind, p.tag, oid_)
         p.proceeds += value - f - tax
         p.sell_gross += value
         p.remove(qty)
@@ -234,7 +235,7 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
         p = pos.get(j)
         if p is None:
             p = pos[j] = _Pos(j, i)
-        value, f, tax = record_fill(i, j, "buy", qty, price, ref, o.reason or o.kind, o.kind, o.tag)
+        value, f, tax = record_fill(i, j, "buy", qty, price, ref, o.reason or o.kind, o.kind, o.tag, o.oid)
         p.cost += value + f
         p.buy_gross += value
         p.bought_qty += qty
@@ -299,7 +300,7 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
                         why = "t_plus_settlement"
                     else:
                         price = max(rules.sell_price(O[i, j]), floor_)
-                        exec_sell(i, j, qty, price, float(O[i, j]), o.reason, o.kind)
+                        exec_sell(i, j, qty, price, float(O[i, j]), o.reason, o.kind, o.oid)
                         o.qty -= qty
                         done = o.qty <= 0 or j not in pos
                 if why:

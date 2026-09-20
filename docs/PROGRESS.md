@@ -508,3 +508,45 @@ python -m predict_stock reco generate --as-of 2026-09-18   # cards only (BUY / W
 python -m predict_stock reco backtest                      # backtest + docs/RECOMMENDATIONS.md
 python -m predict_stock reco report                        # rewrite the report from the stored run
 ```
+
+## Phase 8 — Paper trading bot & operations  ·  implemented and accepted (2026-09-21), uncommitted
+
+Runbook: [OPERATIONS.md](OPERATIONS.md).
+
+### What was built
+
+| piece | where |
+|---|---|
+| **Daily job**: universe sync → ingest + quality → calendar → data checks → features → flags → cards → state → report; each step a `job_runs` row (status, duration), a failure an alert; every step idempotent | `paper/daily.py` |
+| **Paper portfolio = replay** of the stored cards and the INVEST target book through the same engine as the backtest, then written to `paper_orders`, `paper_positions` (one book per sleeve), `portfolio_snapshots`, `recommendation_outcomes` and the status of each recommendation (pending / holding / target / stopped / time_exit / kill_switch / closed / expired / cancelled / skipped) | `paper/replay.py`, `paper/sync.py` |
+| **Cards of the day**: SWING daily; INVEST only on rebalance and tranche dates, recorded in `sleeve_targets` (immutable per date, kind, tranche); a stored card is never rewritten | `paper/live.py`, `reco/job.py:save_live_cards` |
+| **Universe changes**: new member backfilled and scored only once it has enough history (existing `readiness` rule, alerts); removed member NOT sold (SWING until target / stop / time-stop, INVEST until the next rebalance, no more tranches), open recommendations flagged `ra khỏi rổ`; policy `close_now` optional | `paper/daily.py:step_universe, flag_removed`, `paper/live.py` |
+| **Alerts** (dedup until acknowledged): job_failed, api_error, data_missing, stale_data, data_quality, cards_skipped, universe_change, left_universe, kill_switch, notify_failed, backup_failed | `paper/alerts.py` |
+| **Reports** Markdown / HTML / CSV per session; Telegram / e-mail optional (off, credentials only from `.env`, failure = alert) | `paper/report.py` |
+| **Backups**: `mysqldump` (consistent, gzip, sha256, atomic rename), retention 14 daily + 8 weekly, **restore test** into a scratch database with a table-by-table comparison | `paper/backup.py` |
+| **Scheduling**: cron entries with `flock` (daily job 16:30, backup 17:30, weekly restore test); nothing installed automatically | `paper/schedule.py` |
+| **Modes**: `backtest` \| `paper` only; `live` is refused (exit 2); a test scans the sources for anything that could place a real order | `paper/__init__.py`, `tests/test_paper_ops.py` |
+| Migration `0006` (`sleeve_targets`, `paper_orders.order_key`, `recommendations.flags`); the engine logs order quantity / limit and the order id on fills | `alembic/versions/0006_*`, `backtest/engine.py` |
+| CLI: `paper init / run / status / report / alerts / backup / restore-test / crontab / prune-datasets`; `make paper backup restore-test crontab` | `cli.py`, `Makefile` |
+
+### Acceptance
+
+* **Universe swap demo** (`tests/test_paper_e2e.py`, simulated market of 14 stocks, ~1 minute): five consecutive daily runs without an error (40 `job_runs` rows, all `success` with a duration); on day 3 the snapshot **file** is edited (two stocks that hold open recommendations out, two new in) — no code changed. Result: the two new stocks are backfilled (≥ 60 bars) and scored the same day, the two removed ones are no longer scored, four `universe_change` alerts (2 info, 2 warn), the open recommendations of the removed stocks are flagged `ra khỏi rổ`, their INVEST positions are **still open on day 5** with no rebalance sale and no further buys, the INVEST book acts only on rebalance / tranche days, every stored BUY card of the last day passes its own consistency checks (`Card.problems() == []`), none for a removed stock, the report exists in md / html / csv, and **running day 5 again changes no table** (orders, positions, snapshots, recommendations, targets).
+* **Restore test on the real database**: dump 17 MB, restored into a scratch database, 33 tables, 264,767 rows, **0 differences**, 61 s (`paper restore-test`); on the test database in the suite; a tampered dump is refused (checksum), a table written after the dump is reported as the only difference, and the scratch database can never be the real or the test one.
+* **Real run**: `paper init --start 2026-09-21`, then `paper run --as-of 2026-09-18` against the real database and the real DNSE API: all steps `ok` in 65 s (ingest `+0 ~0 =13` per stock: nothing new, no duplicate); the state step correctly waits for the record's first session.
+* 731 tests pass (+27 in this phase).
+
+### Bugs and design mistakes found while building it (kept on purpose)
+1. **A removed stock lost its INVEST position at the next tranche.** The tranche step computed its weights from the weights before the rebalance, so a stock no longer in the universe fell to 0 and was sold — exactly what the brief forbids. Found by the end-to-end test (the removed stock's position was `closed`); now a removed stock keeps what it has (not topped up, not sold). Regression assertion in the e2e test.
+2. **The first restore attempt failed** (piping a gzip file descriptor into `mysql` gave it compressed bytes) and the second comparison showed a difference in `alerts`: the failure of the first attempt had itself written an alert after the dump was taken. The restore now streams the decompressed SQL and `restore-test` takes a fresh dump by default (restoring an older dump legitimately differs in any table written since).
+3. **Card storage is immutable by default** (`overwrite` must be explicit): regenerating a day would otherwise rewrite a card that orders, positions and outcomes already point at.
+4. Manual cards created by `reco generate` before the record started stay `open` in `recommendations`; removal flags only consider cards issued on or after the paper start.
+5. A daily run creates a new dataset version whenever data changed (by design of Phase 3): `paper prune-datasets` removes old Parquet files no model was trained on.
+
+### Limits and assumptions
+* **The models behind the cards failed their pre-registered criteria** (Phases 5-6); the paper record measures what they do going forward, it does not make them good. The record starts after the last available date; nothing here evaluates the held-out period.
+* The paper portfolio is a replay on the vendor's daily bars: fills follow the engine's rules (limit / stop / ATO, T+2, band, costs), not a live order book; no market impact.
+* Cron is provided, not installed. The vendor publishes daily bars after the close; if they are late, `data_missing` / `stale_data` alerts fire and no cards are issued that day — run the job again later (idempotent).
+* Telegram / e-mail senders are implemented and tested with stubs only (no network in tests); they were not exercised against real services.
+* The restore test needs the admin credential (`MYSQL_ROOT_PASSWORD`) to create the scratch database.
+* Backups are on the same machine (`backups/`): copying them elsewhere is up to you.

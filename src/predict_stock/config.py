@@ -358,6 +358,47 @@ class RecoConfig(_Strict):
     artifacts_dir: str = "artifacts/reco"
 
 
+class PaperRemoval(_Strict):
+    """What happens to a position when its stock leaves the universe. Never an urgent sale unless the config says `close_now`."""
+
+    swing: str = "hold_until_exit"  # hold_until_exit (target / stop / time-stop) | close_now
+    invest: str = "next_rebalance"  # next_rebalance | close_now
+
+
+class PaperNotify(_Strict):
+    telegram: bool = False  # needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment
+    email: bool = False  # needs SMTP_HOST, SMTP_USER, SMTP_PASSWORD, SMTP_FROM, SMTP_TO in the environment
+    only_on_alerts_or_cards: bool = False
+
+
+class PaperConfig(_Strict):
+    portfolio_code: str = "paper"
+    start_date: str | None = None  # first session whose cards belong to the paper record; set by `paper init` (never in the past of the data cut-off)
+    universe_snapshot: str | None = None  # CSV kept by the user (symbol[, exchange, weight, ...]); applied every run, a no-op when nothing changed
+    on_removal: PaperRemoval = Field(default_factory=PaperRemoval)
+    stop_on_quality_error: bool = True  # unexplained data errors: no new cards that day (open positions are still managed)
+    stale_days: int = 4  # the newest bar older than this many calendar days is an alert
+    min_share_with_bar: float = 0.90  # members with a bar on the as-of date; below this no cards are issued
+    pending_min_sessions: int = 5  # a recommendation older than validity + this many sessions is closed out of the pending list
+    report_dir: str = "reports/paper"
+    report_formats: list[str] = Field(default_factory=lambda: ["md", "html", "csv"])
+    notify: PaperNotify = Field(default_factory=PaperNotify)
+    schedule_time: str = "16:30"  # local time (Asia/Ho_Chi_Minh), after the close and after the vendor publishes the day's bars
+    schedule_days: str = "1-5"
+
+
+class BackupConfig(_Strict):
+    dir: str = "backups"
+    daily_keep: int = 14  # newest dumps kept
+    weekly_keep: int = 8  # plus the oldest dump of each of the last N weeks
+    restore_database: str = "predict_stock_restore"  # scratch database for the restore test (created and dropped with the admin credentials)
+    compress: bool = True
+
+
+class RunConfig(_Strict):
+    mode: str = "paper"  # backtest | paper. There is no live-trading mode: no code in this project places a real order.
+
+
 class AppConfig(_Strict):
     seed: int = 42
     market: MarketConfig = Field(default_factory=MarketConfig)
@@ -372,6 +413,9 @@ class AppConfig(_Strict):
     swing: SwingConfig = Field(default_factory=SwingConfig)
     invest: InvestConfig = Field(default_factory=InvestConfig)
     reco: RecoConfig = Field(default_factory=RecoConfig)
+    paper: PaperConfig = Field(default_factory=PaperConfig)
+    backup: BackupConfig = Field(default_factory=BackupConfig)
+    run: RunConfig = Field(default_factory=RunConfig)
 
     def snapshot(self) -> dict:
         """JSON-serialisable copy for job_runs.config_snapshot (contains no secrets)."""

@@ -15,7 +15,7 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from predict_stock import universe as uni
@@ -106,6 +106,29 @@ def build_parser() -> argparse.ArgumentParser:
     io = iv.add_parser("oos", help="evaluate the HELD-OUT period for the passing preset(s) and all baselines. Only after a PASS; allowed once")
     io.add_argument("--final", action="store_true", help="required: confirms this is the single final evaluation")
     iv.add_parser("report", help="rewrite docs/INVEST_B1.md / INVEST_B2.md from the latest stored runs (no training)")
+
+    # ---- paper trading and operations
+    pp = sub.add_parser("paper", help="paper trading bot (daily job, status, reports) and operations (backup, restore test, schedule)").add_subparsers(dest="cmd", required=True)
+    pi = pp.add_parser("init", help="fix the first session of the paper record (default: the latest session with data)")
+    pi.add_argument("--start", type=_d)
+    pr = pp.add_parser("run", help="the daily job for a session (idempotent; safe to repeat)")
+    pr.add_argument("--as-of", type=_d, help="YYYY-MM-DD (default: today)")
+    pr.add_argument("--from", dest="from_", type=_d, help="catch up: run every session from this date to --as-of, one after the other")
+    pr.add_argument("--no-ingest", action="store_true", help="do not call the vendor API (data already in the database)")
+    pr.add_argument("--no-report", action="store_true")
+    pr.add_argument("--mode", choices=("backtest", "paper", "live"), help="run mode; only 'paper' runs the bot ('live' does not exist and is refused)")
+    pp.add_parser("status", help="portfolio, open recommendations by status, open alerts")
+    prp = pp.add_parser("report", help="rebuild the report files of a session from the database")
+    prp.add_argument("--as-of", type=_d)
+    pa = pp.add_parser("alerts", help="open alerts; --ack ID acknowledges one")
+    pa.add_argument("--ack", type=int)
+    pb = pp.add_parser("backup", help="mysqldump with checksum; --prune applies the retention")
+    pb.add_argument("--prune", action="store_true")
+    prt = pp.add_parser("restore-test", help="dump now, restore into a scratch database and compare every table with the live one")
+    prt.add_argument("--use-latest", action="store_true", help="restore the newest existing dump instead of taking a fresh one")
+    pp.add_parser("crontab", help="print the cron entries (nothing is installed)")
+    pd_ = pp.add_parser("prune-datasets", help="delete Parquet files of old dataset versions that no model was trained on")
+    pd_.add_argument("--keep", type=int, default=5)
 
     # ---- recommendation cards
     rc_ = sub.add_parser("reco", help="recommendation cards, the combined portfolio and the backtest of the cards").add_subparsers(dest="cmd", required=True)
@@ -206,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
         return _invest(args, cfg, engine)
     if args.group == "reco":
         return _reco(args, cfg, engine)
+    if args.group == "paper":
+        return _paper(args, cfg, engine)
     if args.group == "calendar":
         with session_scope(engine) as s:
             if args.cmd == "sync":
@@ -276,6 +301,102 @@ def _backtest(args, cfg: AppConfig, engine) -> int:
         print(f"{k:18s} {n['cagr'] * 100:8.1f}% {n['sharpe']:10.2f} {n['max_drawdown'] * 100:6.1f}% {g['cagr'] * 100:9.1f}% {g['sharpe']:12.2f}")
     print(f"stored experiments: {out['experiments']}" + ("" if args.no_report else f"\nreport: {cfg.backtest.report_path}"))
     return 0
+
+
+def _paper(args, cfg: AppConfig, engine) -> int:
+    import pandas as pd
+    from predict_stock.paper import check_mode
+    if args.cmd == "crontab":
+        from predict_stock.paper.schedule import crontab
+        print(crontab(cfg))
+        return 0
+    if args.cmd in ("backup", "restore-test"):
+        from predict_stock.paper import backup as BK
+        try:
+            if args.cmd == "backup":
+                path = BK.dump(cfg)
+                print(f"dump: {path} ({path.stat().st_size / 1e6:.1f} MB) sha256 {'ok' if BK.verify(path) else 'MISMATCH'}")
+                if args.prune:
+                    for f in BK.prune(BK.backup_dir(cfg), cfg.backup.daily_keep, cfg.backup.weekly_keep):
+                        print("pruned", f.name)
+                return 0
+            res = BK.restore_test(cfg, fresh=not args.use_latest)
+        except BK.BackupError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            from predict_stock.paper.alerts import raise_alert
+            raise_alert(engine, "error", "backup_failed", str(exc))
+            return 1
+        print(json.dumps(res, indent=1, default=str))
+        if not res["ok"]:
+            from predict_stock.paper.alerts import raise_alert
+            raise_alert(engine, "error", "backup_failed", f"restore test found differences: {res['mismatches'][:3]}")
+        return 0 if res["ok"] else 1
+    if args.cmd == "prune-datasets":
+        from predict_stock.paper.backup import prune_datasets
+        for f in prune_datasets(engine, cfg, args.keep):
+            print("removed", f)
+        return 0
+    if args.cmd == "alerts":
+        from predict_stock.paper.alerts import acknowledge, open_alerts
+        if args.ack:
+            acknowledge(engine, args.ack)
+        for a in open_alerts(engine):
+            print(f"#{a.id:<5} {a.severity:<8} {a.category:<22} {a.created_at:%Y-%m-%d %H:%M}  {a.message[:160]}")
+        return 0
+    if args.cmd == "status":
+        from predict_stock.paper.daily import paper_start
+        from predict_stock.paper.report import collect
+        st = paper_start(engine, cfg)
+        with session_scope(engine) as s:
+            from predict_stock.db.models import PortfolioSnapshot
+            last = s.scalars(select(PortfolioSnapshot).where(PortfolioSnapshot.portfolio_code == cfg.paper.portfolio_code).order_by(PortfolioSnapshot.snapshot_date.desc())).first()
+        d = pd.Timestamp(last.snapshot_date) if last else pd.Timestamp(date.today())
+        c = collect(engine, cfg, d)
+        print(f"mode {cfg.run.mode}; paper record starts {st.date() if st is not None else 'NOT INITIALISED'}; last snapshot {d.date() if last else '-'}")
+        if c["equity"]:
+            e = c["equity"]
+            print(f"equity {e['equity']:,.0f} ({e['since_start'] * 100:+.2f}% since start), cash {e['cash']:,.0f}, drawdown {e['metrics'].get('drawdown', 0) * 100:.1f}%")
+        print("recommendations by status:", c["status_counts"], "| open positions:", len(c["positions"]), "| pending orders:", len(c["pending_orders"]))
+        for a in c["alerts"][:10]:
+            print(f"  alert #{a['id']} {a['severity']} [{a['category']}] {a['message'][:140]}")
+        return 0
+    if args.cmd == "report":
+        from predict_stock.paper.report import collect, write_files
+        d = pd.Timestamp(args.as_of or date.today())
+        files = write_files(cfg, collect(engine, cfg, d))
+        print("\n".join(files.values()))
+        return 0
+    from predict_stock.paper.daily import init_paper, run_daily
+    if args.cmd == "init":
+        with session_scope(engine) as s:
+            from predict_stock.db.models import TradingCalendar
+            last = s.scalar(select(func.max(TradingCalendar.trade_date)).where(TradingCalendar.calendar_code == cfg.ingest.calendar_code))
+        start = args.start or last
+        init_paper(engine, cfg, start)
+        print(f"paper record starts on {start}")
+        return 0
+    try:
+        mode = check_mode(args.mode or cfg.run.mode)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if mode != "paper":
+        print("error: `paper run` only runs in mode 'paper'", file=sys.stderr)
+        return 2
+    client = DnseClient(cfg.dnse)
+    dates = [args.as_of or date.today()]
+    if args.from_:
+        with session_scope(engine) as s:
+            from predict_stock.db.models import TradingCalendar
+            dates = list(s.scalars(select(TradingCalendar.trade_date).where(TradingCalendar.calendar_code == cfg.ingest.calendar_code, TradingCalendar.trade_date >= args.from_,
+                                                                       TradingCalendar.trade_date <= (args.as_of or date.today())).order_by(TradingCalendar.trade_date)))
+    ok = True
+    for d in dates:
+        r = run_daily(engine, cfg, client, d, mode=mode, ingest=not args.no_ingest, report=not args.no_report)
+        ok &= bool(r.get("ok"))
+        steps = {k: ("ok" if v["ok"] else "FAILED") + f" {v['seconds']}s" for k, v in r.items() if isinstance(v, dict) and "seconds" in v}
+        print(f"{r['as_of']} (session {r.get('session')}): {'OK' if r.get('ok') else 'PROBLEMS'} in {r.get('seconds')}s :: " + ", ".join(f"{k} {v}" for k, v in steps.items()))
+    return 0 if ok else 1
 
 
 def _reco(args, cfg: AppConfig, engine) -> int:

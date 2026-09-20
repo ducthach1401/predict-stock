@@ -16,3 +16,7 @@ dist/
 # local artifacts
 *.log
 /artifacts/
+
+# Phase 8 outputs
+backups/
+reports/

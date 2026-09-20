@@ -307,7 +307,7 @@ def generate_live(engine: Engine, cfg: AppConfig, as_of: str | None = None, *, w
             c_e, _ = bundle.contributions(rows, "event")
             pp = pred.assign(details=build_details(pred, c_r, c_e, bundle.features, rows[bundle.features].to_numpy(float)))
             save_predictions(engine, mid, uid, sw.horizon, pp, run_id)
-            save_live_cards(engine, cfg, [c for c in cards if c.action in ("BUY", "WATCH")], pred, mid, uid, run_id)
+            save_live_cards(engine, cfg, [c for c in cards if c.action in ("BUY", "WATCH")], pred, mid, uid, run_id, overwrite=True)
         if write_files:
             out = PROJECT_ROOT / rc.artifacts_dir / "live" / str(d.date())
             out.mkdir(parents=True, exist_ok=True)
@@ -322,25 +322,55 @@ def sw_top(rc) -> int:
     return rc.swing.max_positions + 4
 
 
-def save_live_cards(engine: Engine, cfg: AppConfig, cards: list[Card], swing_pred: pd.DataFrame, swing_model_id: int, uid: int, run_id: int | None) -> int:
-    """BUY / WATCH cards into `recommendations` (idempotent per strategy, instrument, date and action); the SWING cards are linked to their stored prediction."""
+def save_live_cards(engine: Engine, cfg: AppConfig, cards: list[Card], swing_pred: pd.DataFrame | None, swing_model_id: int, uid: int | None, run_id: int | None, *,
+                    overwrite: bool = False) -> int:
+    """BUY / WATCH cards into `recommendations`, unique per (strategy, instrument, date, action). A card that is already stored is left EXACTLY as it was issued
+    (the paper portfolio replays it; regenerating a day must not rewrite history) unless ``overwrite`` is set, which updates it in place (same id). Returns the
+    number of rows written."""
     from predict_stock.db.models import Prediction
     n = 0
     with session_scope(engine) as s:
         for c in cards:
+            d = pd.Timestamp(c.as_of).date()
             pid = None
-            if c.strategy == "SWING":
-                pid = s.scalar(select(Prediction.id).where(Prediction.model_id == c.model_id, Prediction.instrument_id == c.instrument_id, Prediction.as_of_date == pd.Timestamp(c.as_of).date()))
-            s.execute(delete(Recommendation).where(Recommendation.strategy == c.strategy, Recommendation.instrument_id == c.instrument_id,
-                                                   Recommendation.as_of_date == pd.Timestamp(c.as_of).date(), Recommendation.action == c.action))
+            if c.strategy == "SWING" and c.model_id is not None:
+                pid = s.scalar(select(Prediction.id).where(Prediction.model_id == c.model_id, Prediction.instrument_id == c.instrument_id, Prediction.as_of_date == d))
+            row = s.scalars(select(Recommendation).where(Recommendation.strategy == c.strategy, Recommendation.instrument_id == c.instrument_id, Recommendation.as_of_date == d,
+                                                        Recommendation.action == c.action)).first()
+            if row is not None and not overwrite:
+                continue
             x, e = c.exits, c.entry
-            target = x["target2"] if c.strategy == "SWING" else x["scenarios"]["bull"]["price"]
-            stop = x["stop"] if c.strategy == "SWING" else x["bear_reference"]
-            s.add(Recommendation(strategy=c.strategy, instrument_id=c.instrument_id, universe_id=uid, as_of_date=pd.Timestamp(c.as_of).date(), action=c.action, entry_price=e["reference"],
-                                 target_price=target, stop_loss=stop, hold_days_min=cfg.market.settlement_days, hold_days_max=c.holding["max_sessions"],
-                                 exit_conditions=c.to_dict()["exits"] | {"stop_is_hard": c.strategy == "SWING", "cancel": e.get("cancel_conditions")},
-                                 rationale="\n".join(["LÝ DO: "] + c.rationale["reasons"] + ["RỦI RO: "] + c.rationale["risks"] + ["MẤT HIỆU LỰC: "] + c.rationale["invalidation"]),
-                                 rationale_data={"contributions": c.rationale.get("facts") or [], "signal": c.signal}, confidence=c.confidence.get("p_display"), model_id=c.model_id,
-                                 prediction_id=pid, status="open", run_id=run_id, valid_until=pd.Timestamp(c.valid_until).date(), card=c.to_dict(), card_text=c.text_vi()))
+            vals = dict(universe_id=uid, entry_price=e["reference"], target_price=x["target2"] if c.strategy == "SWING" else x["scenarios"]["bull"]["price"],
+                        stop_loss=x["stop"] if c.strategy == "SWING" else x["bear_reference"], hold_days_min=cfg.market.settlement_days, hold_days_max=c.holding["max_sessions"],
+                        exit_conditions=c.to_dict()["exits"] | {"stop_is_hard": c.strategy == "SWING", "cancel": e.get("cancel_conditions")},
+                        rationale="\n".join(["LÝ DO: "] + c.rationale["reasons"] + ["RỦI RO: "] + c.rationale["risks"] + ["MẤT HIỆU LỰC: "] + c.rationale["invalidation"]),
+                        rationale_data={"contributions": c.rationale.get("facts") or [], "signal": c.signal}, confidence=c.confidence.get("p_display"), model_id=c.model_id, prediction_id=pid,
+                        run_id=run_id, valid_until=pd.Timestamp(c.valid_until).date(), card=c.to_dict(), card_text=c.text_vi())
+            if row is None:
+                s.add(Recommendation(strategy=c.strategy, instrument_id=c.instrument_id, as_of_date=d, action=c.action, status="pending" if c.action == "BUY" else "watch", **vals))
+            else:
+                for a, b in vals.items():
+                    setattr(row, a, b)
             n += 1
     return n
+
+
+def save_swing_predictions(engine: Engine, cfg: AppConfig, dc, run_id: int | None) -> int:
+    """The final SWING model's predictions for the day (score, calibrated probability, quantiles, holding time, SHAP top features) into `predictions`,
+    so a recommendation can point at the exact prediction it came from."""
+    from predict_stock.paper import live as LV
+    from predict_stock.swing.folds import with_ends
+    from predict_stock.swing.model import load_bundle
+    from predict_stock.swing.registry import build_details
+    from predict_stock.swing.walkforward import predict_rows
+    mid, path, sha = S._latest_model(engine, "swing_lgbm_final")
+    bundle = load_bundle(PROJECT_ROOT / path, sha)
+    frame = with_ends(dc.setup.frames["swing"])
+    rows = frame[pd.to_datetime(frame["trade_date"]) == dc.d]
+    if rows.empty:
+        return 0
+    pred = predict_rows(bundle, rows)
+    c_r, _ = bundle.contributions(rows, "rank")
+    c_e, _ = bundle.contributions(rows, "event")
+    pp = pred.assign(details=build_details(pred, c_r, c_e, bundle.features, rows[bundle.features].to_numpy(float)))
+    return save_predictions(engine, mid, dc.uid, cfg.swing.horizon, pp, run_id)
