@@ -43,6 +43,7 @@ class Setup:
     dev_end_idx: int
     holdout: Holdout
     dataset_hashes: dict[str, str] = field(default_factory=dict)
+    dataset_ids: dict[str, int] = field(default_factory=dict)
     universe: str = ""
     panel_info: dict = field(default_factory=dict)
 
@@ -70,11 +71,12 @@ def load_setup(engine: Engine, cfg: AppConfig, universe: str | None = None) -> S
     universe = universe or cfg.universe.training_code
     bt = cfg.backtest
     today, hist = date.today(), date.fromisoformat(cfg.ingest.history_start)
-    frames, hashes = {}, {}
+    frames, hashes, ids_by_name = {}, {}, {}
     for name, (fs, ls) in DATASETS.items():                          # built (or reused) through the Phase 3 job, so they are reproducible
         res = build_dataset(engine, cfg, universe_code=universe, feature_set=fs, label_spec=ls, start=hist, end=today)
         frames[name] = read_dataset(res.path, verify_sha256=res.sha256)
         hashes[name] = res.content_hash
+        ids_by_name[name] = res.dataset_id
     ids = sorted(set(frames["swing"]["instrument_id"]) | set(frames["invest"]["instrument_id"]))
     rules = MarketRules.from_config(cfg.market)
     with session_scope(engine) as s:
@@ -94,7 +96,7 @@ def load_setup(engine: Engine, cfg: AppConfig, universe: str | None = None) -> S
     dev_end_idx = int(cal.get_loc(holdout.start)) - 1
     start_idx = int(cal.searchsorted(pd.Timestamp(bt.start)))
     assert_development_only(cal[dev_end_idx], holdout)
-    return Setup(cfg, rules, data, cal, frames, index_close, start_idx, dev_end_idx, holdout, hashes, universe,
+    return Setup(cfg, rules, data, cal, frames, index_close, start_idx, dev_end_idx, holdout, hashes, ids_by_name, universe,
                  {"instruments": len(ids), "repaired_bars": panel.repaired_bars, "band_source": "known exchange" if ex_band is not None else "inferred from trailing returns",
                   "open_missing_bars": int((panel.open.isna() & panel.close.notna()).to_numpy().sum())})
 

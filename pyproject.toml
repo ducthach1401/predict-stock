@@ -19,6 +19,9 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyarrow>=15",  # Parquet dataset snapshots
     "matplotlib>=3.8",  # backtest charts
+    "lightgbm>=4.3",  # SWING model (+ built-in TreeSHAP via pred_contrib)
+    "scikit-learn>=1.4",  # isotonic / Platt calibration
+    "optuna>=3.6",  # hyperparameter search (train/validation only)
 ]
 
 [project.optional-dependencies]

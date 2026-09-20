@@ -279,3 +279,77 @@ python -m predict_stock backtest run --baseline mom_long --noise-seeds 0 --no-re
 python -m predict_stock backtest oos --final    # ONCE, at the very end; refused afterwards
 ```
 
+
+## Phase 5 — SWING strategy  ·  implemented and evaluated (2026-09-20), uncommitted · **verdict: does not beat the baselines after costs**
+
+### Pre-registration (written BEFORE any SWING model was trained)
+
+Fixed now so that the result cannot be argued into shape afterwards. The same content is stored in `experiments` (`swing:preregistration`, with its timestamp) by `swing run` before it trains anything.
+
+* **Model**: LightGBM (`lightgbm` 4.x), five boosters on the `swing:1` features: rank regression on `fwd_rank_5`; binary classifier for "target touched before the stop within 10 sessions" (`tb_label == 1`, target 2 ATR / stop 1 ATR); q10/q50/q90 of `fwd_ret_5`. Calibration isotonic on the validation rows (Platt kept for comparison). Deep learning is **not** attempted: nothing here justifies it before a tree model beats the baselines.
+* **Primary strategy (the one the verdict is about)**: top-10 by the rank score at the close, equal weight, full rebalance on the first session of each week, orders at the next open through the Phase 4 engine. Like-for-like with the weekly baselines. No probability filter.
+* **Secondary strategy**: barrier trades (entry at the next open, stop 1 ATR, target 2 ATR, time-stop 10 sessions, at most 10 positions, calibrated probability ≥ the training base rate). Reported, not decisive.
+* **Walk-forward**: expanding, first fold trains on ≥ 500 sessions, test windows of 125 sessions, embargo 10 sessions (= the barrier horizon), samples purged by the end date of their labels, validation = the last 125 sessions of each training window. Nothing at or after 2025-09-19 is used.
+* **Tuning**: one Optuna study (≤ 25 trials, seed 42) on the first fold's train/validation rows only, objective = mean daily rank IC of the ranking booster on the validation rows; the winner is frozen for every fold. Every trial, failed ones included, is an `experiments` row.
+* **Sensitivities** (K = 5/10/20, entry-probability threshold, ATR target/stop, cost multiples) are reported for information and **never** used to choose the configuration.
+* **Decision rule** — the held-out period is opened (once, together with all baselines) **only if** the primary strategy, over the same window as the baselines, has: (1) net Sharpe above **every** portfolio baseline; (2) above the 95th percentile of 20 random weekly portfolios; (3) mean daily rank IC > 0 with an overlap-adjusted t-statistic ≥ 2.0; (4) positive net Sharpe in ≥ 60% of the walk-forward test windows; (5) net Sharpe still > 0 at 2× costs. If any fails, the conclusion is written as "does not beat the baselines after costs", the held-out period stays untouched and the configuration is not tuned further.
+
+### What was built
+
+| piece | where |
+|---|---|
+| model: 5 LightGBM boosters (rank, event, q10/q50/q90), isotonic + Platt calibration, holding-time table, TreeSHAP, byte-stable `model.json.gz` | `src/predict_stock/swing/model.py`, `calibration.py`, `holding.py` |
+| walk-forward with purging by label end + embargo, per-fold models, final model on all development data | `swing/folds.py`, `swing/walkforward.py` |
+| Optuna (one study, first fold only, every trial → `experiments`) | `swing/tuning.py`, `swing/registry.py` |
+| strategies: primary top-K weekly, secondary barrier trades (engine got `max_positions` and `only_if_flat`) | `swing/strategies.py`, `backtest/engine.py` |
+| evaluation vs baselines over the same window, sensitivities, pre-registered decision, held-out guard | `swing/evaluate.py`, `swing/job.py`, `swing/metrics.py` |
+| report + charts | `docs/SWING.md`, `docs/img/swing_*.png` |
+| DB | migration `0004` (`predictions.details` JSON); `models` (12 names × 2 versions, status `candidate` / `superseded`), 136,958 `predictions`, 26 Optuna + 1 pre-registration + 1 amendments + 2 walk-forward + 4 strategy `experiments`, 88 `model_metrics` |
+
+### Result (development walk-forward 2020-03-13 → 2025-09-18, 11 test windows, net of costs, baselines re-run over the same window)
+
+| strategy | CAGR | Sharpe | max DD | turnover ×/yr | gross CAGR | gross Sharpe | Sharpe at 2× costs |
+|---|---|---|---|---|---|---|---|
+| **SWING top-10, weekly (primary)** | 31.9% | **1.07** | -48% | 32.3 | 64.7% | 1.82 | 0.41 |
+| Equal-weight universe | 31.7% | **1.29** | -48% | 0.2 | 31.8% | 1.29 | 1.27 |
+| Momentum 6-12 m | 32.2% | 1.15 | -57% | 3.0 | 35.2% | 1.23 | 1.08 |
+| Momentum 10 d, weekly (like-for-like) | 25.8% | 0.97 | -44% | 25.5 | 49.8% | 1.61 | 0.41 |
+| Random top-10 weekly (20 seeds) | median -0.07 Sharpe, 95th pct 0.08 | | | | | | |
+| SWING barrier trades (secondary) | -1.1% | 0.04 | -49% | 39.7 | 29.5% | 1.42 | -1.11 |
+
+Pre-registered decision: **1 of 5 criteria fails** — net Sharpe 1.07 is below equal-weight's 1.29 (it beats the weekly baselines — 10-day momentum 0.97, mean reversion, random — and the random-portfolio 95th percentile, but not equal-weight 1.29, 6-12-month momentum 1.15 or its inverse-vol variant 1.13; rank-IC t-stat 4.4; positive net Sharpe in 7 of 11 windows; still positive at 2× costs). The held-out period (2025-09-19 → 2026-09-18) was **not opened**, and no configuration was tuned after seeing the result.
+
+What the numbers say (and do not):
+* **There is a real ranking signal**: mean daily rank IC 0.055 (t 4.4 with the overlap adjustment; positive in 9 of 11 windows) against 0.015 for 10-day momentum and about 0 for mean reversion.
+* **The signal does not survive costs well enough**: the weekly top-10 earns 65% a year before costs and 32% after (turnover 32×/year). Equal-weight earns the same CAGR with lower volatility, hence the higher Sharpe. It beats equal-weight in 4 of 11 windows. Costs are the whole story: with zero slippage the same portfolio has Sharpe 1.38, with zero fee and tax 1.52, with the configured costs 1.07 — but those are not achievable, and this was not used to choose anything.
+* **The probabilities are not usable.** Out of sample the "target before stop" probability has no measurable skill: mean per-fold AUC 0.51 (0.44–0.56), Brier 0.224 (raw) / 0.226 (isotonic) against 0.223 for the training base rate. Calibration did not help (ECE raw 0.069, isotonic 0.072, Platt 0.069): the event rate moves between windows (22%–44%) far more than the model can follow. Filtering entries by probability made the weekly portfolio *far worse* (net Sharpe 0.05 at ≥ 1.0× the calibration-window base rate, -0.45 at 1.25×, and at 1.5× no name passes so there are no trades) — the probability is not a useful entry filter.
+* **Return quantiles are reasonable in width** (q10/q50/q90 covered 10.7% / 48.8% / 88.6%; the q10–q90 interval 77.9% against 80% nominal; tail pinball loss slightly better than a constant, median slightly worse). **Expected holding time has no skill**: mean absolute error 2.70 sessions against 2.67 for always guessing the overall median.
+* Barrier trades lose money after costs whatever the ATR pair or probability threshold that was tried (net Sharpe -0.58 … 0.46 across the ATR pairs and probability thresholds tried, none positive at 2× costs): gross Sharpe is 1.2–1.6 but turnover is 26–44×/year.
+* K (5 / 10 / 20 → net Sharpe 1.03 / 1.07 / 0.93) is not what matters.
+* Reading it at face value: Sharpe differences of a few tenths over ~5.5 years are within noise (standard error ≈ 0.5); "does not beat equal-weight" is the fair reading, not "is worse than".
+
+Deep learning was **not** attempted: the boosted trees do not beat the baselines, so nothing justifies a heavier model.
+
+### Bugs and design mistakes found while building it (kept on purpose)
+
+1. **Isotonic calibration output a probability of 1.0** in 3 of 11 folds (a few top-scored validation rows were all events). Fixed by fitting isotonic on equal-count bins of ≥ 150 rows (`swing.isotonic_min_bin`; test with 8 planted "lucky" rows). Found by looking at the highest predicted probability per fold.
+2. **The barrier strategy was flat for whole test windows** because its entry bar was the *training* base rate while the calibrated probability is centred on the *validation* base rate (lower in 4 of 11 folds). Threshold now relative to the calibration window's rate. Found by looking at the equity curve.
+   Both were found after the first run had been looked at. They touch only the probability and the secondary strategy; the primary strategy (rank score) is byte-identical in both runs (Sharpe 1.0746 both times). The first run's figures are kept in `docs/SWING.md`, the change is recorded in `experiments` (`swing:amendments`), and the barrier strategy went from Sharpe 0.32 (partly idle) to 0.04 — i.e. the correction made it look *worse*, which is a sign it was not chosen for looks.
+3. The report first said "3 rows purged" per fold; the purge removes **nothing** (embargo = barrier horizon). The 3 rows are unlabelled instrument-days of a suspended stock (Oct 2020). Accounting is now separate (`purged` vs `unlabelled`).
+4. My first top-K helper renormalised weights when a probability filter left fewer than K names (each got 1/n instead of 1/K, so "cash" never appeared). Found by a unit test; weights are now 1/K.
+5. Two chart/report slips (categorical x ticks, a stale "five test windows" sentence) fixed.
+
+### Limits and assumptions
+* Everything under Phase 4's limits applies (universe look-ahead/survivorship, adjusted prices, inferred price band, T+2 all period, brief-default costs not re-verified, no market impact); LARGE50 hindsight inflates every strategy here, the baselines included.
+* The comparison window starts at 2020-03-13 (the first test session), not 2019; baselines were re-run over it. Eleven six-month windows, one path of history.
+* One Optuna study on the first fold's validation rows (25 trials, best validation IC 0.059 — optimistic by construction, being a max of 25). Its parameters are frozen; the test-window results do not use them for selection.
+* Barrier strategy trades from the next open with stop/target as a percentage of the signal-day close, so realised barriers differ slightly from the label's.
+* `swing oos --final` exists and is guarded (refuses unless the stored development run passed the pre-registered criteria under an unchanged pre-registration; exit code 4). It has not been and, under the pre-registered rule, must not be run for this model.
+
+### How to run
+```bash
+make swing                                   # about 5 minutes; idempotent: unchanged data + config gives identical model files and rows
+python -m predict_stock swing run --trials 25 --noise-seeds 20
+python -m predict_stock swing report         # rewrite docs/SWING.md from the latest stored run
+python -m predict_stock swing oos --final    # only after a PASS; refused otherwise
+```

@@ -1,7 +1,7 @@
 """The `backtest` jobs: baselines on the development period (+ report, charts, DB) and the one-time held-out evaluation."""
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import numpy as np
 import pandas as pd
@@ -92,10 +92,11 @@ def run_baselines_job(engine: Engine, cfg: AppConfig, *, keys: list[str] | None 
 
 
 # ---- the held-out final period: ONE evaluation ------------------------------------------------------------------------------------
-def run_holdout_once(engine: Engine, cfg: AppConfig, *, keys: list[str] | None = None, extra_candidates: list[str] | None = None) -> dict:
+def run_holdout_once(engine: Engine, cfg: AppConfig, *, keys: list[str] | None = None, extra_candidates: list[str] | None = None,
+                     extra_signals=None, setup: Setup | None = None) -> dict:
     """Evaluate the baselines on the held-out period. Allowed ONCE per (universe, holdout): the first call records itself, any
     later call raises ``OOSAlreadyUsed``. Run it for the final model AND every baseline in the same call."""
-    setup = load_setup(engine, cfg)
+    setup = setup or load_setup(engine, cfg)
     with session_scope(engine) as s:
         if oos_status(s, setup.holdout, setup.universe) is not None:
             reveal_holdout(s, setup.holdout, setup.universe, candidates=[], summary={})     # raises OOSAlreadyUsed with the details
@@ -113,9 +114,17 @@ def run_holdout_once(engine: Engine, cfg: AppConfig, *, keys: list[str] | None =
             r = run_backtest(setup.data, sig, setup.rules.scaled_costs(mult), engine_config(cfg), start=start, end=end)
             res[name] = M.compute_metrics(r.equity, trips=r.round_trips, fills=r.fills, exposure=r.exposure, rf_annual=cfg.backtest.risk_free_annual)
         out[key] = res
+    for name, (sig, max_positions) in (extra_signals or {}).items():         # model strategies: signals built from the final model's held-out predictions
+        from predict_stock.backtest.engine import run_backtest
+        from predict_stock.backtest.runner import engine_config
+        res = {}
+        for label, mult in (("net", 1.0), ("gross", 0.0)):
+            r = run_backtest(setup.data, sig, setup.rules.scaled_costs(mult), replace(engine_config(cfg), max_positions=max_positions), start=start, end=end)
+            res[label] = M.compute_metrics(r.equity, trips=r.round_trips, fills=r.fills, exposure=r.exposure, rf_annual=cfg.backtest.risk_free_annual)
+        out[name] = res
     with tracked_run(engine, "backtest_holdout", cfg, {"holdout": [str(setup.holdout.start.date()), str(setup.holdout.end.date())]}) as (run_id, stats):
         with session_scope(engine) as s:
-            row = reveal_holdout(s, setup.holdout, setup.universe, candidates=list(out) + (extra_candidates or []), summary=clean(out),
+            row = reveal_holdout(s, setup.holdout, setup.universe, candidates=list(out) + [c for c in (extra_candidates or []) if c not in out], summary=clean(out),
                                  run_id=run_id, config_snapshot_id=save_config_snapshot(s, cfg.snapshot()))
             stats["experiment_id"] = row.id
     return clean(out)

@@ -155,6 +155,69 @@ class BacktestConfig(_Strict):
     artifacts_dir: str = "artifacts/backtests"
 
 
+class SwingFolds(_Strict):
+    scheme: str = "expanding"  # expanding | rolling
+    train_min_sessions: int = 500  # first test window starts after this many sessions of data (+ embargo)
+    train_window_sessions: int = 750  # rolling scheme only
+    test_sessions: int = 125
+    step_sessions: int = 125
+    embargo_sessions: int = 10  # >= the triple-barrier horizon, so purging by label end is (almost) a no-op for the barrier label
+    val_sessions: int = 125  # last sessions of each training window: early stopping, calibration, holding-time table
+
+
+class SwingOptuna(_Strict):
+    trials: int = 25  # hard cap: every trial (also the failed ones) is recorded in `experiments`
+    seed: int = 42
+    timeout_s: int | None = 1200
+
+
+class SwingStrategy(_Strict):
+    top_k: int = 10  # PRIMARY strategy: top-K by the rank score, equal weight, rebalanced weekly (like-for-like with the baselines)
+    rebalance: str = "weekly"
+    barrier_target_mult: float = 2.0  # SECONDARY strategy: barrier trades, exits by ATR multiples (same as the triple-barrier label)
+    barrier_stop_mult: float = 1.0
+    barrier_max_hold: int = 10
+    min_prob_multiple: float = 1.0  # enter only if the calibrated probability >= this multiple of the training base rate
+    max_positions: int = 10
+
+
+class SwingDecision(_Strict):
+    """PRE-REGISTERED (written to `experiments` before the first model is trained). The held-out period is opened only on PASS."""
+
+    min_ic_tstat: float = 2.0  # mean daily rank IC vs the forward-return rank, overlap-adjusted t-statistic
+    min_positive_fold_share: float = 0.6  # share of walk-forward test windows with net Sharpe > 0
+    stress_cost_multiple: float = 2.0  # net Sharpe must stay > 0 at this multiple of the configured costs
+
+
+class SwingConfig(_Strict):
+    feature_set: str = "swing:1"
+    label_spec: str = "swing:1"
+    rank_target: str = "fwd_rank_5"
+    return_target: str = "fwd_ret_5"
+    event_label: str = "tb_label"  # event = the target is touched before the stop (tb_label == 1)
+    hold_column: str = "tb_time"
+    horizon: int = 10
+    quantiles: list[float] = Field(default_factory=lambda: [0.1, 0.5, 0.9])
+    n_estimators: int = 600
+    early_stopping_rounds: int = 50
+    calibration: str = "isotonic"  # isotonic | platt
+    isotonic_min_bin: int = 150  # isotonic is fitted on equal-count bins of at least this many validation rows (raw points let a few lucky rows reach probability 1)
+    holding_buckets: int = 10
+    seed: int = 42
+    num_threads: int = 4
+    lgbm: dict = Field(default_factory=lambda: {"learning_rate": 0.05, "num_leaves": 15, "min_child_samples": 200, "feature_fraction": 0.8,
+                                                 "bagging_fraction": 0.8, "bagging_freq": 5, "lambda_l2": 10.0})
+    folds: SwingFolds = Field(default_factory=SwingFolds)
+    optuna: SwingOptuna = Field(default_factory=SwingOptuna)
+    strategy: SwingStrategy = Field(default_factory=SwingStrategy)
+    decision: SwingDecision = Field(default_factory=SwingDecision)
+    sensitivity_k: list[int] = Field(default_factory=lambda: [5, 10, 20])
+    sensitivity_min_prob: list[float] = Field(default_factory=lambda: [0.0, 1.0, 1.25, 1.5])
+    sensitivity_atr: list[tuple[float, float]] = Field(default_factory=lambda: [(2.0, 1.0), (3.0, 1.5), (1.5, 1.0), (4.0, 2.0)])  # (target, stop)
+    artifacts_dir: str = "artifacts/models"
+    report_path: str = "docs/SWING.md"
+
+
 class AppConfig(_Strict):
     seed: int = 42
     market: MarketConfig = Field(default_factory=MarketConfig)
@@ -166,6 +229,7 @@ class AppConfig(_Strict):
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     datasets: DatasetConfig = Field(default_factory=DatasetConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
+    swing: SwingConfig = Field(default_factory=SwingConfig)
 
     def snapshot(self) -> dict:
         """JSON-serialisable copy for job_runs.config_snapshot (contains no secrets)."""

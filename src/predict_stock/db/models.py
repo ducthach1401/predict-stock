@@ -523,6 +523,7 @@ class Prediction(Base):
     score: Mapped[float] = mapped_column(Double)
     proba: Mapped[float | None] = mapped_column(Double)
     rank_in_universe: Mapped[int | None] = mapped_column(Integer)
+    details: Mapped[dict | None] = mapped_column(JSON)  # q10/q50/q90, expected holding time (median, p75, n), raw proba, top SHAP contributions
     run_id: Mapped[int | None] = mapped_column(BigPK, ForeignKey("job_runs.id"))
     created_at: Mapped[datetime] = _created()
 

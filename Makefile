@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 ALEMBIC ?= .venv/bin/alembic
 EFFECTIVE_DATE ?= $(shell date +%F)
 
-.PHONY: setup db-up migrate universe data backfill quality features datasets backtest test test-live
+.PHONY: setup db-up migrate universe data backfill quality features datasets backtest swing test test-live
 
 setup: db-up migrate universe
 
@@ -42,6 +42,11 @@ datasets: features
 # walk-forward folds, noise floor; writes docs/BASELINES.md + charts and stores the results in `experiments`.
 backtest: datasets
 	$(PY) -m predict_stock backtest run
+
+# Phase 5: SWING model: pre-registration, one Optuna study, walk-forward on the development period, comparison with the baselines over the same window,
+# report docs/SWING.md, models + predictions in the database. The held-out period is NOT touched (`swing oos --final` only after a PASS).
+swing: datasets
+	$(PY) -m predict_stock swing run
 
 test:
 	$(PY) -m pytest

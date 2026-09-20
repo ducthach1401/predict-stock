@@ -97,6 +97,16 @@ def build_parser() -> argparse.ArgumentParser:
     bo.add_argument("--final", action="store_true", help="required: confirms this is the single final evaluation")
     bt.add_parser("list", help="the baselines")
 
+    # ---- swing model
+    sw = sub.add_parser("swing", help="SWING model: walk-forward, evaluation against the baselines").add_subparsers(dest="cmd", required=True)
+    sr = sw.add_parser("run", help="pre-register, tune once, walk-forward, evaluate against the baselines, report, DB")
+    sr.add_argument("--trials", type=int, help="Optuna trials (default: config swing.optuna.trials)")
+    sr.add_argument("--noise-seeds", type=int, default=20, help="random portfolios for the noise floor")
+    sr.add_argument("--no-report", action="store_true", help="do not write docs/SWING.md and the charts")
+    so = sw.add_parser("oos", help="evaluate the HELD-OUT period for the final SWING model and all baselines. Only after a PASS of the pre-registered criteria; allowed once")
+    so.add_argument("--final", action="store_true", help="required: confirms this is the single final evaluation")
+    sw.add_parser("report", help="rewrite docs/SWING.md and the charts from the latest stored run (no training)")
+
     # ---- features / datasets
     ft = sub.add_parser("features", help="feature / label registry").add_subparsers(dest="cmd", required=True)
     ft.add_parser("list", help="registered plugins and the feature sets / label specs in config/feature_sets.yaml")
@@ -170,6 +180,8 @@ def main(argv: list[str] | None = None) -> int:
         return _features_datasets(args, cfg, engine)
     if args.group == "backtest":
         return _backtest(args, cfg, engine)
+    if args.group == "swing":
+        return _swing(args, cfg, engine)
     if args.group == "calendar":
         with session_scope(engine) as s:
             if args.cmd == "sync":
@@ -239,6 +251,44 @@ def _backtest(args, cfg: AppConfig, engine) -> int:
         n, g = r["net"], r["gross"]
         print(f"{k:18s} {n['cagr'] * 100:8.1f}% {n['sharpe']:10.2f} {n['max_drawdown'] * 100:6.1f}% {g['cagr'] * 100:9.1f}% {g['sharpe']:12.2f}")
     print(f"stored experiments: {out['experiments']}" + ("" if args.no_report else f"\nreport: {cfg.backtest.report_path}"))
+    return 0
+
+
+def _swing(args, cfg: AppConfig, engine) -> int:
+    from predict_stock.swing.job import run_swing
+    if args.cmd == "report":
+        from predict_stock.swing.report import rewrite_latest
+        print(rewrite_latest(cfg))
+        return 0
+    if args.cmd == "oos":
+        from predict_stock.swing.job import HoldoutClosed, run_swing_oos
+        if not args.final:
+            print("error: the held-out period can be evaluated ONCE; add --final to confirm this is the final evaluation", file=sys.stderr)
+            return 2
+        try:
+            print(json.dumps(run_swing_oos(engine, cfg), indent=2))
+        except HoldoutClosed as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 4
+        except OOSAlreadyUsed as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 3
+        return 0
+    out = run_swing(engine, cfg, trials=args.trials, noise_seeds=args.noise_seeds, write=not args.no_report)
+    p = out["payload"]
+    print(f"walk-forward {p['window'][0]} → {p['window'][1]}, {len(p['folds'])} folds; held-out {p['holdout'][0]} → {p['holdout'][1]} untouched")
+    print(f"{'strategy':22s} {'CAGR net':>9s} {'Sharpe net':>10s} {'MDD':>7s} {'turnover':>8s} {'CAGR gross':>10s} {'Sharpe gross':>12s}")
+    rows = {"SWING top-K": p["primary"], "SWING barrier": p["secondary"], **p["baselines"]}
+    for k, r in rows.items():
+        n, g = r["net"], r["gross"]
+        print(f"{k:22s} {n['cagr'] * 100:8.1f}% {n['sharpe']:10.2f} {n['max_drawdown'] * 100:6.1f}% {n.get('turnover_annual') or 0:8.1f} {g['cagr'] * 100:9.1f}% {g['sharpe']:12.2f}")
+    ic = p["ic"]["scores"]["swing_lgbm"]
+    print(f"rank IC {ic['mean']:.4f} (t {ic['t_stat']:.2f}, hit {ic['hit_rate']:.2f}); calibration ECE raw {p['calibration']['variants']['raw']['ece']:.4f} → "
+          f"{p['calibration']['variants'][p['calibration']['used']]['ece']:.4f}")
+    d = p["decision"]
+    print("decision:", "PASS - the held-out period may be opened" if d["passed"] else "FAIL - does not beat the baselines after costs; held-out period stays closed")
+    for c in d["criteria"]:
+        print(f"  [{'x' if c['ok'] else ' '}] {c['name']}: {c['value']} vs {c['threshold']} {c['detail']}")
     return 0
 
 

@@ -121,3 +121,31 @@ backtest:
   report_path: docs/BASELINES.md
   image_dir: docs/img
   artifacts_dir: artifacts/backtests
+
+# ---- SWING model (Phase 5) ------------------------------------------------------------------------------
+swing:
+  feature_set: "swing:1"
+  label_spec: "swing:1"
+  rank_target: fwd_rank_5        # rank score: cross-sectional rank of the 5-session forward return
+  return_target: fwd_ret_5       # q10 / q50 / q90 of the 5-session forward return
+  event_label: tb_label          # event = target touched before the stop within `horizon` sessions (tb_label == 1)
+  hold_column: tb_time
+  horizon: 10
+  quantiles: [0.1, 0.5, 0.9]
+  n_estimators: 600
+  early_stopping_rounds: 50
+  calibration: isotonic
+  isotonic_min_bin: 150          # added after the first run showed isotonic outputs of 1.0 in 3 folds (see docs/SWING.md)
+  seed: 42
+  num_threads: 4
+  folds: {scheme: expanding, train_min_sessions: 500, test_sessions: 125, step_sessions: 125, embargo_sessions: 10, val_sessions: 125}
+  optuna: {trials: 25, seed: 42, timeout_s: 1200}     # ONE study on the training/validation data of the first fold; the result is frozen
+  strategy: {top_k: 10, rebalance: weekly, barrier_target_mult: 2.0, barrier_stop_mult: 1.0, barrier_max_hold: 10, min_prob_multiple: 1.0, max_positions: 10}
+  # PRE-REGISTERED decision rule (also stored in `experiments` before training). The held-out period is opened ONLY if all hold.
+  decision: {min_ic_tstat: 2.0, min_positive_fold_share: 0.6, stress_cost_multiple: 2.0}
+  # reported for information only; NEVER used to choose the configuration
+  sensitivity_k: [5, 10, 20]
+  sensitivity_min_prob: [0.0, 1.0, 1.25, 1.5]
+  sensitivity_atr: [[2.0, 1.0], [3.0, 1.5], [1.5, 1.0], [4.0, 2.0]]
+  artifacts_dir: artifacts/models
+  report_path: docs/SWING.md

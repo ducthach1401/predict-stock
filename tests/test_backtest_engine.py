@@ -410,3 +410,54 @@ def test_a_window_can_start_mid_history_using_the_previous_close_as_reference(ru
     full = go(d, {4: buy(0.1)}, rules)
     part = run_backtest(d, {4: buy(0.1)}, rules.scaled_costs(0), EngineConfig(), start=3)
     assert len(full.fills) == 0 and len(part.fills) == 0 and part.equity.index[0] == d.close.index[3]      # both see the locked ceiling at session 5
+
+
+# ---- entries only when flat / a cap on the number of positions (barrier strategies) ---------------------------------------------------
+def test_only_if_flat_does_not_top_up_or_reset_the_exit_levels_of_a_held_position(rules):
+    d = make_data(o=[20000] * 8)
+    sigs = {0: buy(0.1, max_hold=5, only_if_flat=True), 2: buy(0.1, max_hold=5, only_if_flat=True), 3: buy(0.1, max_hold=5, only_if_flat=True)}
+    r = go(d, sigs, rules)
+    buys = r.fills[r.fills.side == "buy"]
+    assert list(buys["idx"]) == [1]                                     # the later signals are ignored while the position exists
+    assert r.fills[r.fills.side == "sell"].iloc[0]["idx"] == 6          # and the time-stop still counts from the first entry
+
+
+def test_without_only_if_flat_a_second_signal_tops_up(rules):
+    d = make_data(o=[20000] * 8)
+    r = go(d, {0: buy(0.1), 2: buy(0.2)}, rules)
+    assert list(r.fills[r.fills.side == "buy"]["idx"]) == [1, 3]
+
+
+def test_a_pending_buy_also_blocks_only_if_flat(rules):
+    d = make_data(o=[20000] * 6)
+    r = go(d, {0: buy(0.1, only_if_flat=True), 1: Signal([SignalItem(1, 0.3, only_if_flat=True)])}, rules)
+    assert list(r.fills[r.fills.side == "buy"]["idx"]) == [1]           # the signal at session 1 finds the buy filled at 1 (held): ignored
+
+
+def _two_names(n=8):
+    o = np.full((n, 3), 20000.0)
+    return make_data(o)
+
+
+def test_max_positions_skips_entries_beyond_the_cap_in_signal_order(rules):
+    d = _two_names()
+    sig = Signal([SignalItem(1, 0.1, only_if_flat=True), SignalItem(2, 0.1, only_if_flat=True), SignalItem(3, 0.1, only_if_flat=True)], full_rebalance=False)
+    r = go(d, {0: sig}, rules, max_positions=2)
+    assert sorted(r.fills[r.fills.side == "buy"]["instrument_id"]) == [1, 2]
+    assert r.stats["blocked"]["max_positions"] == 1
+
+
+def test_the_cap_counts_positions_already_held_and_frees_a_slot_on_exit(rules):
+    d = _two_names(12)
+    first = Signal([SignalItem(1, 0.1, max_hold=4)], full_rebalance=False)
+    later = Signal([SignalItem(2, 0.1, max_hold=4), SignalItem(3, 0.1, max_hold=4)], full_rebalance=False)
+    r = go(d, {0: first, 1: later, 8: later}, rules, max_positions=2)
+    buys = r.fills[r.fills.side == "buy"].sort_values("idx")
+    assert list(zip(buys["instrument_id"], buys["idx"]))[:2] == [(1, 1), (2, 2)]        # 3 is refused while 1 and 2 are held
+    assert 3 in set(buys["instrument_id"]) and buys[buys.instrument_id == 3]["idx"].min() >= 9   # accepted once the slots are free
+
+
+def test_no_cap_by_default(rules):
+    d = _two_names()
+    sig = Signal([SignalItem(i, 0.1) for i in (1, 2, 3)], full_rebalance=False)
+    assert len(go(d, {0: sig}, rules).fills) == 3

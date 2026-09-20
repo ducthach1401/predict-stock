@@ -39,6 +39,7 @@ class SignalItem:
     order: str = "open"                 # "open" (market at next open) | "limit"
     limit_offset: float = 0.0           # buy limit = signal-day close x (1 - offset)
     valid_sessions: int = 1
+    only_if_flat: bool = False          # entry only: ignored while the instrument is held or has a pending buy (no top-up, no reset of its exit levels)
 
 
 @dataclass
@@ -53,6 +54,7 @@ class EngineConfig:
     rebalance_threshold: float = 0.0    # skip a change smaller than this FRACTION OF THE TARGET position value (never blocks an exit to 0)
     tie: str = "stop_first"             # both barriers inside one bar: "stop_first" | "target_first"
     max_pending_sell_sessions: int = 20
+    max_positions: int | None = None    # at most this many instruments held or awaiting a buy; a new entry beyond it is skipped (counted as `max_positions`)
 
 
 @dataclass
@@ -343,6 +345,13 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
                 j = col.get(it.instrument_id)
                 if j is None or not np.isfinite(last_close[j]):
                     continue
+                if it.only_if_flat and (j in pos or any(x.j == j for x in pending)):
+                    continue
+                if cfg.max_positions is not None and it.weight > 0 and j not in pos:
+                    occupied = set(pos) | {x.j for x in pending if x.side == "buy"}
+                    if j not in occupied and len(occupied) >= cfg.max_positions:
+                        blocked["max_positions"] += 1
+                        continue
                 for o in [x for x in pending if x.j == j]:                      # a new decision supersedes old pending orders
                     log_order(o, "superseded", i)
                 pending = [x for x in pending if x.j != j]
