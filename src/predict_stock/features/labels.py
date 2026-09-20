@@ -64,6 +64,33 @@ class ForwardRankReturn(LabelBuilder):
         return out
 
 
+def triple_barrier_arrays(O: np.ndarray, H: np.ndarray, L: np.ndarray, C: np.ndarray, A: np.ndarray, hz: int, target_mult: float, stop_mult: float):
+    """The triple-barrier outcome for every (session, instrument) of wide arrays: (label, sessions-to-outcome, return, steps). ``A`` = absolute ATR at the
+    decision close. Used by the label plugin and, with other multiples, by the recommendation cards' similar-signal statistics."""
+    T, N = C.shape
+    target, stop = C + target_mult * A, C - stop_mult * A
+    active = np.isfinite(C) & np.isfinite(A) & ((np.arange(T) + hz) < T)[:, None]
+    label, time, ret = (np.full((T, N), np.nan) for _ in range(3))
+    steps = np.zeros((T, N), dtype=int)
+    resolved = np.zeros((T, N), dtype=bool)
+    for k in range(1, hz + 1):
+        hk, lk, ok = _shift_up(H, k), _shift_up(L, k), _shift_up(O, k)
+        free = active & ~resolved & np.isfinite(hk) & np.isfinite(lk)
+        hit_stop = free & (lk <= stop)
+        hit_tgt = free & (hk >= target) & ~hit_stop            # same session: the stop wins
+        exit_stop = np.where(np.isfinite(ok) & (ok <= stop), ok, stop)
+        exit_tgt = np.where(np.isfinite(ok) & (ok >= target), ok, target)
+        for hit, lab, ex in ((hit_stop, -1.0, exit_stop), (hit_tgt, 1.0, exit_tgt)):
+            label[hit], time[hit], steps[hit] = lab, k, k
+            ret[hit] = (ex / C - 1)[hit]
+        resolved |= hit_stop | hit_tgt
+    c_end = _shift_up(C, hz)
+    timed_out = active & ~resolved & np.isfinite(c_end)
+    label[timed_out], time[timed_out], steps[timed_out] = 0.0, hz, hz
+    ret[timed_out] = (c_end / C - 1)[timed_out]
+    return label, time, ret, steps
+
+
 @register_label
 class TripleBarrier(LabelBuilder):
     name, version = "triple_barrier", 1
@@ -91,26 +118,7 @@ class TripleBarrier(LabelBuilder):
         for j, iid in enumerate(panel.close.columns):
             a = atr(panel.bars_of(iid), p["atr_window"])
             A[:, j] = a.reindex(cal).to_numpy()
-        target, stop = C + p["target_mult"] * A, C - p["stop_mult"] * A
-        active = np.isfinite(C) & np.isfinite(A) & ((np.arange(T) + hz) < T)[:, None]
-        label, time, ret = (np.full((T, N), np.nan) for _ in range(3))
-        steps = np.zeros((T, N), dtype=int)
-        resolved = np.zeros((T, N), dtype=bool)
-        for k in range(1, hz + 1):
-            hk, lk, ok = _shift_up(H, k), _shift_up(L, k), _shift_up(O, k)
-            free = active & ~resolved & np.isfinite(hk) & np.isfinite(lk)
-            hit_stop = free & (lk <= stop)
-            hit_tgt = free & (hk >= target) & ~hit_stop            # same session: the stop wins
-            exit_stop = np.where(np.isfinite(ok) & (ok <= stop), ok, stop)
-            exit_tgt = np.where(np.isfinite(ok) & (ok >= target), ok, target)
-            for hit, lab, ex in ((hit_stop, -1.0, exit_stop), (hit_tgt, 1.0, exit_tgt)):
-                label[hit], time[hit], steps[hit] = lab, k, k
-                ret[hit] = (ex / C - 1)[hit]
-            resolved |= hit_stop | hit_tgt
-        c_end = _shift_up(C, hz)
-        timed_out = active & ~resolved & np.isfinite(c_end)
-        label[timed_out], time[timed_out], steps[timed_out] = 0.0, hz, hz
-        ret[timed_out] = (c_end / C - 1)[timed_out]
+        label, time, ret, steps = triple_barrier_arrays(O, H, L, C, A, hz, p["target_mult"], p["stop_mult"])
         s = p["suffix"]
         ends = _end_dates(cal, steps).set_axis(panel.close.columns, axis=1)
         mk = lambda a: pd.DataFrame(a, index=cal, columns=panel.close.columns)

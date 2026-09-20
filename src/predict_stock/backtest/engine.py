@@ -40,6 +40,19 @@ class SignalItem:
     limit_offset: float = 0.0           # buy limit = signal-day close x (1 - offset)
     valid_sessions: int = 1
     only_if_flat: bool = False          # entry only: ignored while the instrument is held or has a pending buy (no top-up, no reset of its exit levels)
+    limit_price: float | None = None    # order="limit": the buy limit as an absolute price (overrides limit_offset)
+    trigger_price: float | None = None  # order="stop": breakout buy-stop, triggered when the session's high reaches it
+    zone_low: float | None = None       # order="ato": fills at the open only if the open is inside [zone_low, zone_high], otherwise the order is cancelled
+    zone_high: float | None = None
+    cancel_if_open_above: float | None = None   # any buy order: cancelled (not chased) when a session OPENS above this price
+    target1_pct: float | None = None    # first target: `target1_fraction` of the position is sold when it is reached
+    target1_fraction: float = 0.5
+    breakeven_after_t1: bool = False    # after target 1 the stop moves to the average entry price, effective from the NEXT session
+    tag: str | None = None              # copied to the orders / fills / round trips it produces (e.g. a recommendation id)
+    stop_price: float | None = None     # absolute exit levels (a recommendation card states prices, not percentages); they override the *_pct fields
+    target_price: float | None = None
+    target1_price: float | None = None
+    group: str | None = None            # position-count group (e.g. a sleeve); see EngineConfig.max_positions_by_group
 
 
 @dataclass
@@ -55,6 +68,9 @@ class EngineConfig:
     tie: str = "stop_first"             # both barriers inside one bar: "stop_first" | "target_first"
     max_pending_sell_sessions: int = 20
     max_positions: int | None = None    # at most this many instruments held or awaiting a buy; a new entry beyond it is skipped (counted as `max_positions`)
+    max_positions_by_group: dict | None = None   # {group: n}: at most n positions (held or awaiting a buy) whose entry carried that group
+    kill_drawdown: float | None = None  # equity drawdown from its peak that stops trading: everything is sold at the next open and buys are ignored for `kill_cooldown` sessions
+    kill_cooldown: int = 21
 
 
 @dataclass
@@ -94,10 +110,12 @@ class _Order:
     reason: str = ""
     item: SignalItem | None = None
     tries: int = 0
+    tag: str | None = None
 
 
 class _Pos:
-    __slots__ = ("j", "lots", "cost", "proceeds", "buy_gross", "sell_gross", "entry", "stop", "target", "time_idx", "last_reason", "fills")
+    __slots__ = ("j", "lots", "cost", "proceeds", "buy_gross", "sell_gross", "entry", "stop", "target", "time_idx", "last_reason", "fills", "target1", "t1_fraction",
+                 "t1_done", "breakeven", "stop_pending", "stop_pending_from", "tag", "bought_qty", "group")
 
     def __init__(self, j: int, entry: int):
         self.j, self.lots, self.entry = j, [], entry
@@ -106,6 +124,15 @@ class _Pos:
         self.time_idx = None
         self.last_reason = ""
         self.fills = 0
+        self.target1 = None
+        self.t1_fraction = 0.5
+        self.t1_done = False
+        self.breakeven = False
+        self.stop_pending = None
+        self.stop_pending_from = 0
+        self.tag = None
+        self.bought_qty = 0
+        self.group = None
 
     @property
     def qty(self) -> int:
@@ -142,8 +169,12 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
         for it in sig.items:
             if it.weight < 0:
                 raise ValueError(f"instrument {it.instrument_id}: weight {it.weight} is negative; the engine is long-only")
-            if it.order not in ("open", "limit"):
+            if it.order not in ("open", "limit", "stop", "ato"):
                 raise ValueError(f"unknown order type {it.order!r}")
+            if it.order == "stop" and it.trigger_price is None:
+                raise ValueError(f"instrument {it.instrument_id}: a stop (breakout) order needs trigger_price")
+            if it.order == "ato" and it.zone_low is None and it.zone_high is None:
+                raise ValueError(f"instrument {it.instrument_id}: an ATO order needs zone_low and / or zone_high")
     cash = float(cfg.capital)
     pos: dict[int, _Pos] = {}
     pending: list[_Order] = []
@@ -153,11 +184,12 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
     fills, orders_log, trips = [], [], []
     blocked = Counter()
     oid = 0
+    peak, killed, killed_until, kill_events = float(cfg.capital), False, -1, []
     eq_rows, cash_rows, expo_rows = [], [], []
 
     def log_order(o: _Order, status: str, i: int | None, reason: str = ""):
         orders_log.append({"order_id": o.oid, "instrument_id": ids[o.j], "side": o.side, "kind": o.kind, "created": cal[o.created],
-                           "executed": cal[i] if i is not None else pd.NaT, "status": status, "reason": reason or o.reason})
+                           "executed": cal[i] if i is not None else pd.NaT, "status": status, "reason": reason or o.reason, "tag": o.tag})
 
     def band_prices(i: int, j: int) -> tuple[float, float]:
         ref = last_close[j]                                              # the last traded close before this session
@@ -165,7 +197,7 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
             return np.inf, 0.0
         return float(rules.ceiling(ref, B[i, j])), float(rules.floor(ref, B[i, j]))
 
-    def record_fill(i: int, j: int, side: str, qty: int, price: float, ref: float, reason: str, kind: str):
+    def record_fill(i: int, j: int, side: str, qty: int, price: float, ref: float, reason: str, kind: str, tag: str | None = None):
         nonlocal cash
         value = qty * price
         if side == "buy":
@@ -176,7 +208,7 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
             cash += value - f - tax
         adverse = (price - ref) if side == "buy" else (ref - price)       # against you > 0; a limit fill better than the open < 0
         fills.append({"date": cal[i], "idx": i, "instrument_id": ids[j], "side": side, "qty": qty, "price": price, "ref_price": ref,
-                      "value": value, "fee": f, "tax": tax, "slippage_cost": adverse * qty, "reason": reason, "kind": kind})
+                      "value": value, "fee": f, "tax": tax, "slippage_cost": adverse * qty, "reason": reason, "kind": kind, "tag": tag})
         return value, f, tax
 
     def close_position(i: int, j: int, p: _Pos, reason: str):
@@ -184,12 +216,13 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
         trips.append({"instrument_id": ids[j], "entry_date": cal[p.entry], "exit_date": cal[i], "sessions": i - p.entry,
                       "cost": net_cost, "proceeds": net_proceeds, "pnl": net_proceeds - net_cost,
                       "net_return": net_proceeds / net_cost - 1 if net_cost > 0 else np.nan,
-                      "gross_return": p.sell_gross / p.buy_gross - 1 if p.buy_gross > 0 else np.nan, "exit_reason": reason})
+                      "gross_return": p.sell_gross / p.buy_gross - 1 if p.buy_gross > 0 else np.nan, "exit_reason": reason, "tag": p.tag,
+                      "avg_entry": p.buy_gross / p.bought_qty if p.bought_qty else np.nan, "qty": p.bought_qty})
         del pos[j]
 
     def exec_sell(i: int, j: int, qty: int, price: float, ref: float, reason: str, kind: str):
         p = pos[j]
-        value, f, tax = record_fill(i, j, "sell", qty, price, ref, reason, kind)
+        value, f, tax = record_fill(i, j, "sell", qty, price, ref, reason, kind, p.tag)
         p.proceeds += value - f - tax
         p.sell_gross += value
         p.remove(qty)
@@ -201,16 +234,31 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
         p = pos.get(j)
         if p is None:
             p = pos[j] = _Pos(j, i)
-        value, f, tax = record_fill(i, j, "buy", qty, price, ref, o.reason or o.kind, o.kind)
+        value, f, tax = record_fill(i, j, "buy", qty, price, ref, o.reason or o.kind, o.kind, o.tag)
         p.cost += value + f
         p.buy_gross += value
+        p.bought_qty += qty
         p.lots.append([qty, i])
         p.fills += 1
+        if p.tag is None:
+            p.tag = o.tag
         it = o.item
-        if it is not None and (p.stop is None and p.target is None and p.time_idx is None):
-            if it.stop_pct is not None:
+        if p.group is None and it is not None:
+            p.group = it.group
+        if it is not None and (p.stop is None and p.target is None and p.time_idx is None and p.target1 is None):
+            if it.target1_price is not None:
+                p.target1 = float(it.target1_price)
+                p.t1_fraction, p.breakeven = it.target1_fraction, it.breakeven_after_t1
+            elif it.target1_pct is not None:
+                p.target1 = rules.round_up(price * (1 + it.target1_pct))
+                p.t1_fraction, p.breakeven = it.target1_fraction, it.breakeven_after_t1
+            if it.stop_price is not None:
+                p.stop = float(it.stop_price)
+            elif it.stop_pct is not None:
                 p.stop = rules.round_down(price * (1 - it.stop_pct))
-            if it.target_pct is not None:
+            if it.target_price is not None:
+                p.target = float(it.target_price)
+            elif it.target_pct is not None:
                 p.target = rules.round_up(price * (1 + it.target_pct))
             if it.max_hold is not None:
                 p.time_idx = i + it.max_hold
@@ -267,8 +315,34 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
                 why = ""
                 ceil_, floor_ = band_prices(i, j)
                 has_bar = np.isfinite(C[i, j])
+                cap = o.item.cancel_if_open_above if o.item is not None else None
+                if cap is not None and np.isfinite(O[i, j]) and O[i, j] > cap:
+                    blocked["gap_above_zone"] += 1
+                    log_order(o, "cancelled", i, "open above the entry zone: not chased")
+                    continue
                 if not has_bar:
                     why = "suspended_or_no_open"
+                elif o.kind == "stop":
+                    trig = o.limit
+                    if not np.isfinite(H[i, j]) or H[i, j] < trig:
+                        why = "trigger_not_reached"
+                    elif np.isfinite(O[i, j]) and O[i, j] >= ceil_ * (1 - rules.lock_tolerance):
+                        why = "limit_up_locked"
+                    else:
+                        base = max(trig, O[i, j]) if np.isfinite(O[i, j]) else trig
+                        price = min(rules.buy_price(base), ceil_)
+                        if o.item.zone_high is not None and price > o.item.zone_high:
+                            why = "above_zone"
+                elif o.kind == "ato":
+                    it_ = o.item
+                    if not open_ok(i, j):
+                        why = "suspended_or_no_open"
+                    elif (it_.zone_low is not None and O[i, j] < it_.zone_low) or (it_.zone_high is not None and O[i, j] > it_.zone_high):
+                        why = "open_outside_zone"
+                    elif O[i, j] >= ceil_ * (1 - rules.lock_tolerance):
+                        why = "limit_up_locked"
+                    else:
+                        price = min(rules.buy_price(O[i, j]), ceil_)
                 elif o.kind == "limit":
                     lim = o.limit
                     if not np.isfinite(L[i, j]) or L[i, j] > lim:
@@ -301,7 +375,10 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
 
         # 2. exit levels on positions whose shares are sellable
         for j, p in list(pos.items()):
-            if (p.stop is None and p.target is None) or not open_ok(i, j) or not (np.isfinite(H[i, j]) and np.isfinite(L[i, j])):
+            if p.stop_pending is not None and i >= p.stop_pending_from:        # break-even stop after target 1 (from the session after it was reached)
+                p.stop = max(p.stop or 0.0, p.stop_pending)
+                p.stop_pending = None
+            if (p.stop is None and p.target is None and (p.target1 is None or p.t1_done)) or not open_ok(i, j) or not (np.isfinite(H[i, j]) and np.isfinite(L[i, j])):
                 continue
             sellable = p.sellable(i, settle)
             if sellable <= 0:
@@ -312,22 +389,43 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
                 continue
             o_, h_, l_ = O[i, j], H[i, j], L[i, j]
             stop, tgt = p.stop, p.target
+            t1 = p.target1 if (p.target1 is not None and not p.t1_done) else None
+
+            def take_first_target(price_t1: float, why: str) -> None:
+                """Sell ``t1_fraction`` of the sellable shares (whole lots) at target 1. A position too small to split skips the partial sale."""
+                p.t1_done = True
+                q = rules.lots(p.sellable(i, settle) * p.t1_fraction)
+                if lot <= q < p.qty:
+                    exec_sell(i, j, q, float(price_t1), float(o_), why, "exit_rule")
+                    if p.breakeven and p.bought_qty:
+                        p.stop_pending, p.stop_pending_from = rules.round_up(p.buy_gross / p.bought_qty), i + 1
+
             price = reason = None
             if stop is not None and o_ <= stop:
                 price, reason = max(rules.sell_price(o_), floor_), "stop_gap"
             elif tgt is not None and o_ >= tgt:
                 price, reason = o_, "target_gap"
             else:
+                if t1 is not None and o_ >= t1:                          # opened through target 1 (below target 2): the partial sale is at the open
+                    take_first_target(o_, "target1_gap")
+                    t1 = None
+                    if j not in pos or p.qty == 0:
+                        continue
                 hit_s = stop is not None and l_ <= stop
                 hit_t = tgt is not None and h_ >= tgt
-                if hit_s and hit_t:
-                    hit_s, hit_t = (True, False) if cfg.tie == "stop_first" else (False, True)
+                hit_1 = t1 is not None and h_ >= t1
+                if hit_s and (hit_t or hit_1):
+                    hit_s, hit_t, hit_1 = (True, False, False) if cfg.tie == "stop_first" else (False, hit_t, hit_1)
                 if hit_s:
                     price, reason = max(rules.sell_price(stop), l_, floor_), "stop"
                 elif hit_t:
+                    if t1 is not None:                                   # both targets inside the bar: the partial first, then the rest at target 2
+                        take_first_target(t1, "target1")
                     price, reason = float(tgt), "target"
-            if price is not None:
-                exec_sell(i, j, sellable, float(price), float(o_), reason, "exit_rule")
+                elif hit_1:
+                    take_first_target(t1, "target1")
+            if price is not None and j in pos:
+                exec_sell(i, j, p.sellable(i, settle), float(price), float(o_), reason, "exit_rule")
 
         # 3. mark to market at the close
         for j in range(N):
@@ -337,8 +435,28 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
         equity = cash + held
         eq_rows.append((cal[i], equity)); cash_rows.append(cash); expo_rows.append(held / equity if equity > 0 else 0.0)
 
+        # 3b. kill-switch: a drawdown beyond the limit sells everything at the next open and blocks new buys for the cooldown
+        if cfg.kill_drawdown is not None:
+            if killed and i >= killed_until:
+                killed, peak = False, equity                             # cooldown over: trading resumes from a fresh peak
+            if not killed:
+                peak = max(peak, equity)
+                if equity / peak - 1.0 <= -cfg.kill_drawdown:
+                    killed, killed_until = True, i + cfg.kill_cooldown
+                    kill_events.append(cal[i])
+                    for o in [x for x in pending if x.side == "buy"]:
+                        log_order(o, "cancelled", i, "kill_switch")
+                    pending = [x for x in pending if x.side != "buy" and not (x.side == "sell" and x.kind == "rebalance" and x.reason == "kill_switch")]
+                    for j, p in pos.items():
+                        oid += 1
+                        pending = [x for x in pending if not (x.j == j and x.side == "sell")]
+                        pending.append(_Order(oid, j, "sell", "rebalance", i, i + 1, i + 1 + cfg.max_pending_sell_sessions, qty=p.qty, reason="kill_switch", tag=p.tag))
+
         # 4. the signal computed at this close becomes orders for the next session
         sig = signals.get(i)
+        if sig is not None and killed:
+            blocked["kill_switch"] += sum(1 for it in sig.items if it.weight > 0)
+            sig = None
         if sig is not None and i + 1 < end:                              # a decision at the last session cannot execute
             listed = {col[it.instrument_id] for it in sig.items if it.instrument_id in col}
             for it in sig.items:
@@ -346,7 +464,13 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
                 if j is None or not np.isfinite(last_close[j]):
                     continue
                 if it.only_if_flat and (j in pos or any(x.j == j for x in pending)):
+                    blocked["already_held_or_pending"] += 1
                     continue
+                if cfg.max_positions_by_group and it.group in cfg.max_positions_by_group and it.weight > 0 and j not in pos:
+                    occ = {k for k, q in pos.items() if q.group == it.group} | {x.j for x in pending if x.side == "buy" and x.item is not None and x.item.group == it.group}
+                    if j not in occ and len(occ) >= cfg.max_positions_by_group[it.group]:
+                        blocked["max_positions_group"] += 1
+                        continue
                 if cfg.max_positions is not None and it.weight > 0 and j not in pos:
                     occupied = set(pos) | {x.j for x in pending if x.side == "buy"}
                     if j not in occupied and len(occupied) >= cfg.max_positions:
@@ -365,14 +489,16 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
                 if delta > 0 and it.weight > 0:
                     lim = None
                     if it.order == "limit":
-                        lim = rules.round_down(last_close[j] * (1 - it.limit_offset))
+                        lim = it.limit_price if it.limit_price is not None else rules.round_down(last_close[j] * (1 - it.limit_offset))
+                    elif it.order == "stop":
+                        lim = it.trigger_price
                     pending.append(_Order(oid, j, "buy", it.order, i, i + 1, i + max(1, it.valid_sessions), value=delta, limit=lim,
-                                          reason="rebalance" if cur_qty else "entry", item=it))
+                                          reason="rebalance" if cur_qty else "entry", item=it, tag=it.tag))
                 elif delta < 0 or it.weight == 0:
                     qty = cur_qty if it.weight == 0 else rules.lots(-delta / last_close[j])
                     if qty >= (1 if it.weight == 0 else lot) and cur_qty > 0:
                         pending.append(_Order(oid, j, "sell", "rebalance", i, i + 1, i + 1 + cfg.max_pending_sell_sessions, qty=min(qty, cur_qty),
-                                              reason="rebalance"))
+                                              reason="rebalance", tag=it.tag or (pos[j].tag if j in pos else None)))
             if sig.full_rebalance:
                 for j in list(pos):
                     if j in listed:
@@ -389,6 +515,6 @@ def run_backtest(data: MarketData, signals: dict[int, Signal], rules: MarketRule
     open_pos = pd.DataFrame([{"instrument_id": ids[j], "qty": p.qty, "entry_date": cal[p.entry], "value": p.qty * last_close[j]} for j, p in pos.items()])
     fills_df = pd.DataFrame(fills)
     orders_df = pd.DataFrame(orders_log)
-    stats = {"blocked": dict(blocked), "n_fills": len(fills), "n_round_trips": len(trips), "open_positions": len(pos)}
+    stats = {"blocked": dict(blocked), "n_fills": len(fills), "n_round_trips": len(trips), "open_positions": len(pos), "kill_events": [str(d.date()) for d in kill_events]}
     return BacktestResult(equity_s, pd.Series(cash_rows, index=equity_s.index, name="cash"), pd.Series(expo_rows, index=equity_s.index, name="exposure"),
                           fills_df, orders_df, pd.DataFrame(trips), open_pos, stats)

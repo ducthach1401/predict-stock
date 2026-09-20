@@ -150,8 +150,8 @@ Holdings overlap from one rebalance to the next, so these are descriptive, not i
 
 Stored signals (`predictions.details`, latest rebalance date of the last fold model, best candidate):
 
-* 2025-05-05 · SHB · rank 1 · score 0.888 · bear/base/bull -18% / 3% / 31% over 63 sessions · thesis-break triggers: none · contributions: mom_6m=0.98 → +0.096; mom_12m=0.98 → +0.096; sma_ratio_200=0.92 → +0.084; dd_252=0.88 → +0.076
-* 2025-05-05 · TCB · rank 2 · score 0.860 · bear/base/bull -17% / 3% / 24% over 63 sessions · thesis-break triggers: none · contributions: mom_12m=0.94 → +0.088; mom_6m=0.88 → +0.076; sma_ratio_200=0.86 → +0.072; dd_252=0.84 → +0.068
+* 2025-05-05 · SHB · rank 1 · score 0.888 · bear/base/bull -18% / 3% / 31% over 63 sessions · thesis-break triggers: none · contributions: mom_6m_csrank=0.98 → +0.096; mom_12m_csrank=0.98 → +0.096; sma_ratio_200_csrank=0.92 → +0.084; dd_252_csrank=0.88 → +0.076
+* 2025-05-05 · TCB · rank 2 · score 0.860 · bear/base/bull -17% / 3% / 24% over 63 sessions · thesis-break triggers: none · contributions: mom_12m_csrank=0.94 → +0.088; mom_6m_csrank=0.88 → +0.076; sma_ratio_200_csrank=0.86 → +0.072; dd_252_csrank=0.84 → +0.068
 
 ## Fundamentals
 

@@ -62,7 +62,7 @@ class FactorModel:
 
     def contributions(self, frame: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
         t = np.nan_to_num(self._terms(frame), nan=0.5)
-        return (t - 0.5) / len(self.factors), [f"{'-' if s < 0 else ''}{c.removesuffix('_csrank')}" for c, s in self.factors]
+        return (t - 0.5) / len(self.factors), [f"{'-' if s < 0 else ''}{c}" for c, s in self.factors]                  # the inputs ARE the cross-sectional ranks
 
     def inputs(self) -> list[str]:
         return [c for c, _ in self.factors]

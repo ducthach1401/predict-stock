@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 ALEMBIC ?= .venv/bin/alembic
 EFFECTIVE_DATE ?= $(shell date +%F)
 
-.PHONY: setup db-up migrate universe data backfill quality features datasets backtest swing invest test test-live
+.PHONY: setup db-up migrate universe data backfill quality features datasets backtest swing invest reco test test-live
 
 setup: db-up migrate universe
 
@@ -52,6 +52,11 @@ swing: datasets
 # The held-out period is NOT touched (`invest oos --final` only after a PASS).
 invest: datasets
 	$(PY) -m predict_stock invest run
+
+# Phase 7: today's recommendation cards (BUY / WATCH into `recommendations`) and the backtest of the cards exactly as issued -> docs/RECOMMENDATIONS.md.
+reco:
+	$(PY) -m predict_stock reco generate
+	$(PY) -m predict_stock reco backtest
 
 test:
 	$(PY) -m pytest

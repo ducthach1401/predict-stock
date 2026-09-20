@@ -53,7 +53,7 @@ def test_factor_contributions_add_up_to_the_score_minus_one_half(frame, cfg):
     m = FactorModel([(c, int(s)) for c, s in cfg.factors])
     rows = frame.head(100)
     contrib, names = m.contributions(rows)
-    assert np.allclose(contrib.sum(axis=1) + 0.5, m.predict(rows)) and names[2] == "-vol_126"
+    assert np.allclose(contrib.sum(axis=1) + 0.5, m.predict(rows)) and names[2] == "-vol_126_csrank"
 
 
 def test_factor_score_is_missing_when_too_many_factors_are_missing(frame, cfg):

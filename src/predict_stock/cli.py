@@ -107,6 +107,16 @@ def build_parser() -> argparse.ArgumentParser:
     io.add_argument("--final", action="store_true", help="required: confirms this is the single final evaluation")
     iv.add_parser("report", help="rewrite docs/INVEST_B1.md / INVEST_B2.md from the latest stored runs (no training)")
 
+    # ---- recommendation cards
+    rc_ = sub.add_parser("reco", help="recommendation cards, the combined portfolio and the backtest of the cards").add_subparsers(dest="cmd", required=True)
+    rg = rc_.add_parser("generate", help="today's cards from the final models (BUY / WATCH into `recommendations`, NO_TRADE with reasons in files)")
+    rg.add_argument("--as-of", help="YYYY-MM-DD (default: the latest session)")
+    rg.add_argument("--no-db", action="store_true", help="do not write to the database")
+    rg.add_argument("--show", type=int, default=3, help="print this many cards")
+    rb = rc_.add_parser("backtest", help="backtest the cards exactly as they would have been issued")
+    rb.add_argument("--no-report", action="store_true")
+    rc_.add_parser("report", help="rewrite docs/RECOMMENDATIONS.md from the latest stored backtest")
+
     # ---- swing model
     sw = sub.add_parser("swing", help="SWING model: walk-forward, evaluation against the baselines").add_subparsers(dest="cmd", required=True)
     sr = sw.add_parser("run", help="pre-register, tune once, walk-forward, evaluate against the baselines, report, DB")
@@ -194,6 +204,8 @@ def main(argv: list[str] | None = None) -> int:
         return _swing(args, cfg, engine)
     if args.group == "invest":
         return _invest(args, cfg, engine)
+    if args.group == "reco":
+        return _reco(args, cfg, engine)
     if args.group == "calendar":
         with session_scope(engine) as s:
             if args.cmd == "sync":
@@ -263,6 +275,43 @@ def _backtest(args, cfg: AppConfig, engine) -> int:
         n, g = r["net"], r["gross"]
         print(f"{k:18s} {n['cagr'] * 100:8.1f}% {n['sharpe']:10.2f} {n['max_drawdown'] * 100:6.1f}% {g['cagr'] * 100:9.1f}% {g['sharpe']:12.2f}")
     print(f"stored experiments: {out['experiments']}" + ("" if args.no_report else f"\nreport: {cfg.backtest.report_path}"))
+    return 0
+
+
+def _reco(args, cfg: AppConfig, engine) -> int:
+    if args.cmd == "report":
+        from predict_stock.reco.report import rewrite_latest
+        print(rewrite_latest(cfg))
+        return 0
+    if args.cmd == "generate":
+        from predict_stock.reco.job import generate_live
+        out = generate_live(engine, cfg, args.as_of, write_db=not args.no_db)
+        cards = out["cards"]
+        for act in ("BUY", "WATCH", "NO_TRADE"):
+            print(f"{act}: {sum(c.action == act for c in cards)}")
+        print("evidence:", out["evidence"])
+        shown = 0
+        for c in cards:
+            if c.action == "BUY" and shown < args.show:
+                print("\n" + c.text_vi())
+                shown += 1
+        for c in [c for c in cards if c.action == "NO_TRADE"][:8]:
+            print(f"[không phát hành] {c.symbol} ({c.strategy}): {c.rejected}")
+        return 0
+    from predict_stock.reco.job import run_backtest_job
+    out = run_backtest_job(engine, cfg, write=not args.no_report)
+    p = out["payload"]
+    pf = p["portfolio"]
+    print(f"window {p['window'][0]} → {p['window'][1]}; cards buy {p['cards']['buy']} watch {p['cards']['watch']} no_trade {p['cards']['no_trade']}")
+    print(f"{'':28s} {'CAGR':>7s} {'Sharpe':>7s} {'MDD':>7s} {'gross CAGR':>10s}")
+    rows = {"combined (cards)": (pf["net"], pf["gross"]), "combined, no kill-switch": (pf["no_kill_switch"], None), **{v["title"]: (v["net"], v["gross"]) for v in p["benchmarks"].values()}}
+    for k, (n, g) in rows.items():
+        print(f"{k:28s} {n['cagr'] * 100:6.1f}% {n['sharpe']:7.2f} {n['max_drawdown'] * 100:6.1f}% {'' if g is None else f'{g['cagr'] * 100:9.1f}%':>10s}")
+    for sl, v in p["sleeves"].items():
+        print(f"sleeve {sl}: profit {v['pnl_pct_capital'] * 100:.1f}% of capital, Sharpe {v['sharpe']:.2f}")
+    print("kill-switch:", pf["exposure"]["kill_events"])
+    o = p["swing"]["orders"]
+    print(f"SWING cards {o['cards_issued']}, orders {o['orders_placed']}, fill rate {o['fill_rate']}, trades {p['swing'].get('trades')}, outcomes {p['swing'].get('outcome_share')}")
     return 0
 
 

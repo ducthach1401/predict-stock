@@ -301,6 +301,63 @@ class InvestConfig(_Strict):
     report_dir: str = "docs"
 
 
+class RecoSwing(_Strict):
+    """SWING card rules. Every number here is a rule stated BEFORE the recommendations were backtested; none was fitted to the backtest."""
+
+    max_positions: int = 6  # at most this many SWING positions / new cards per day (the sleeve is 30% of capital, 5% per name)
+    entry_style: str = "auto"  # auto | pullback | breakout | ato   (auto: breakout when the close is within `breakout_within_pct` of the 20-session high, else pullback)
+    breakout_within_pct: float = 0.02
+    breakout_buffer_atr: float = 0.10  # breakout trigger = 20-session high + this many ATR (rounded up to the tick)
+    breakout_zone_atr: float = 0.30  # do not chase above trigger + this many ATR
+    pullback_atr: tuple[float, float] = (0.60, 0.15)  # limit zone = close - (0.60 .. 0.15) ATR
+    ato_zone_pct: tuple[float, float] = (-0.01, 0.01)  # ATO only if the open is within these percent of the previous close
+    stop_atr: float = 1.0  # stop = reference entry - stop_atr x ATR
+    target1_atr: float = 1.0
+    target2_atr: float = 2.0
+    use_resistance: bool = True  # cap the targets just under the nearest resistance (the highest high of the last `resistance_lookback` sessions) when it lies above the entry
+    resistance_lookback: int = 60
+    t1_fraction: float = 0.5  # share of the position sold at target 1
+    breakeven_after_t1: bool = True  # after target 1 the stop moves to the average entry price (from the next session)
+    max_hold: int = 10  # time-stop, sessions
+    expected_hold_cap: int = 10
+    min_rr: float = 1.5  # a card whose reward:risk (to target 2) is below this is NOT issued
+    validity_sessions: int = 3
+    risk_per_trade: float = 0.0075  # share of total capital lost if the stop is hit (0.5% - 1% is the brief's range)
+    max_weight: float = 0.05  # per name, share of total capital
+
+
+class RecoInvest(_Strict):
+    entry_zone_pct: tuple[float, float] = (-0.02, 0.005)  # buy limit zone around the close; the order is a limit at the zone's high
+    validity_sessions: int = 5
+    max_weight: float = 0.10  # per name per preset, share of total capital
+    watch_ranks: int = 5  # names ranked just below the top-K get a WATCH card
+    time_review_multiple: float = 1.0  # the maximum holding time = horizon x this
+
+
+class RecoPortfolio(_Strict):
+    capital: float = 1_000_000_000.0
+    allocation: dict[str, float] = Field(default_factory=lambda: {"swing": 0.30, "invest": 0.70})
+    invest_split: dict[str, float] = Field(default_factory=lambda: {"b1": 0.5, "b2": 0.5})  # of the INVEST share
+    max_weight_name: float = 0.15  # a name in total over all sleeves
+    max_open_risk: float = 0.05  # sum over open SWING cards of the loss if every stop is hit, share of total capital
+    kill_drawdown: float = 0.20  # portfolio drawdown from its peak that stops all trading
+    kill_cooldown: int = 21  # sessions flat after a kill-switch before trading resumes
+
+
+class RecoConfig(_Strict):
+    swing: RecoSwing = Field(default_factory=RecoSwing)
+    invest: RecoInvest = Field(default_factory=RecoInvest)
+    portfolio: RecoPortfolio = Field(default_factory=RecoPortfolio)
+    card_model: dict[str, str] = Field(default_factory=lambda: {"b1": "factor", "b2": "factor"})  # the INVEST candidate behind the cards (the pre-declared, nothing-fitted one)
+    similar_min_n: int = 30  # a similar-signal group with fewer past signals than this is flagged
+    evidence_min_rows: int = 3000  # past out-of-sample rows needed before the display grade can be anything but "not enough evidence"
+    evidence_auc_ok: float = 0.55  # below this AUC of past out-of-sample predictions the model probability is not shown as a point estimate
+    gate_on_verdict: bool = False  # True: a sleeve whose model failed the pre-registered criteria only issues WATCH cards (paper trading: False)
+    kill_switch: bool = True
+    report_path: str = "docs/RECOMMENDATIONS.md"
+    artifacts_dir: str = "artifacts/reco"
+
+
 class AppConfig(_Strict):
     seed: int = 42
     market: MarketConfig = Field(default_factory=MarketConfig)
@@ -314,6 +371,7 @@ class AppConfig(_Strict):
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     swing: SwingConfig = Field(default_factory=SwingConfig)
     invest: InvestConfig = Field(default_factory=InvestConfig)
+    reco: RecoConfig = Field(default_factory=RecoConfig)
 
     def snapshot(self) -> dict:
         """JSON-serialisable copy for job_runs.config_snapshot (contains no secrets)."""

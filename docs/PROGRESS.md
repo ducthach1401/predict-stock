@@ -435,3 +435,76 @@ python -m predict_stock invest run --preset b2 --noise-seeds 20
 python -m predict_stock invest report        # rewrite the two reports from the latest stored runs
 python -m predict_stock invest oos --final   # only after a PASS; refused otherwise
 ```
+
+## Phase 7 — Recommendation cards & combined portfolio  ·  implemented and evaluated (2026-09-20), uncommitted · **the cards work as specified; the strategy behind them does not beat the baselines**
+
+### Rules fixed BEFORE the recommendations were backtested (`config/default.yaml`, section `reco`)
+
+None of these numbers may be changed after seeing the backtest of the cards; sensitivity to them would be reported, not used to choose.
+
+* **Cards.** BUY / WATCH / NO_TRADE. A card is issued only with all four mandatory parts (entry, target — or scenarios for INVEST —, rationale, holding time) and valid prices; otherwise it is NO_TRADE with the reason. Every card carries the pre-registered validation verdict of the model behind it and a "statistical estimate, paper trading only" line.
+* **SWING entry.** `auto`: breakout (buy-stop at the 20-session high + 0.1 ATR, zone up to +0.3 ATR, cancelled — not chased — if the session opens above the zone) when the close is within 2% of the 20-session high, else pullback (limit zone = close − 0.60 … 0.15 ATR). ATO is available by configuration. All prices are rounded to the HOSE tick and clamped into the next session's ±7% band; a zone that cannot fit is not issued. Validity 3 sessions.
+* **SWING exits.** Reference entry = the middle of the zone. Stop = entry − 1.0 ATR. Target 1 = entry + 1.0 ATR (half of the position, then the stop moves to the average entry from the next session), target 2 = entry + 2.0 ATR (the barrier of the model's probability). Both targets are capped just under the highest high of the last 60 sessions when it lies above the entry. **R:R = (target 2 − entry) / (entry − stop); below 1.5 the card is not issued.** Time-stop 10 sessions. Earliest sale = 2 sessions after the fill (T+2).
+* **SWING size.** Loss if the stop is hit = 0.75% of total capital, capped at 5% of capital per name, whole lots of 100, at most 6 positions; open risk ≤ 5% of capital.
+* **INVEST cards.** Top 10 of the pre-declared candidate (the rule-based factor score, nothing fitted) at each scheduled rebalance; limit zone [−2%, +0.5%] around the close, order = limit at the zone's high, valid 5 sessions, 2 tranches (5 / 10 sessions apart); bear / base / bull = q10 / q50 / q90 of the horizon return turned into price zones; thesis-break conditions (below SMA200, relative-strength rank below 0.4, drawdown beyond 15% / 25%, out of the top 10) instead of a stop; equal weight within the sleeve.
+* **Portfolio.** 30% SWING / 70% INVEST (35% B1 + 35% B2), ≤ 15% of capital in one name over all sleeves, **kill-switch at 20% drawdown from the peak** (all sold at the next open, no buys for 21 sessions, then a fresh peak). Each sleeve is a separate book of positions (a stock held in two sleeves is two positions).
+* **Probability shown on a card.** The calibrated model probability is the headline number only if the model's PAST out-of-sample predictions (labels already ended) had AUC ≥ 0.55 and ≥ 3000 rows of evidence; otherwise the headline is the historical win rate of the similar-signal group (same calibrated-probability bucket of the fold's validation rows) with its n, flagged when n < 30. The grade (KHÁ / TRUNG BÌNH / THẤP / CHƯA ĐỦ BẰNG CHỨNG) is on the card.
+* **Backtest.** The cards, exactly as issued (prices, order type, cancel condition, validity, stop, two targets, time-stop, size), are turned into engine orders; window = where all sleeves have out-of-sample predictions; costs = Phase 4's; reported before / after costs, with and without the kill-switch, per sleeve, against equal-weight, VN30 and VNINDEX, with block-bootstrap intervals; stated probability vs realised; stated R:R vs realised; expected vs actual holding.
+
+### What was built
+
+| piece | where |
+|---|---|
+| **Engine** (needed to backtest the cards as stated; every addition has tests, defaults leave Phase 4 results unchanged): explicit limit price, breakout buy-stop, ATO, "cancel if the session opens above the zone" (no chasing), absolute stop / target 1 / target 2 prices, partial sale at target 1 with the stop moved to the average entry from the next session, per-group position caps, kill-switch on drawdown (sell at the next open, no buys for a cooldown, fresh peak afterwards), order tags carried to fills and round trips | `backtest/engine.py` |
+| **Card** (dataclass → JSON, Vietnamese text, `recommendations` row): identity, entry, exits, holding, confidence, rationale, sizing, validation status; consistency checks (all four mandatory parts, tick grid, next-session band, ordering stop < entry < target 1 ≤ target 2) | `reco/cards.py` |
+| **Builders** with the configured rules: entry style (pullback / breakout / ATO), zone clamped into the ±7% band, stop / targets in ATR capped under the nearest resistance, R:R gate, sizing by risk-per-trade with per-name cap and lots of 100, thesis-break conditions and scenarios for INVEST, grade of the evidence, template rationale from real numbers (always risks and invalidation) | `reco/builders.py` |
+| **Aggregator**: sleeve budgets (30 / 35 / 35%), per-name cap across sleeves (scale down when at least half fits, else reject with the reason), open-risk cap, kill-switch state | `reco/aggregate.py` |
+| **Sources**: market context from the engine's own prices, stored walk-forward models, similar-signal statistics from each fold's validation rows (point-in-time), evidence (past out-of-sample AUC with labels already ended) | `reco/sources.py` |
+| **Backtest of the cards** (one shared book, each sleeve its own set of positions via one price column per sleeve and stock), outcomes, calibration of the shown probability | `reco/backtest.py`, `reco/analyze.py`, `reco/job.py` |
+| Report, charts, CLI (`reco generate / backtest / report`), `make reco`, migration `0005` (`recommendations.valid_until`, `card`, `card_text`) | `docs/RECOMMENDATIONS.md`, `docs/img/reco_*.png` |
+| Live cards of the latest session (2026-09-18): 24 BUY, 13 WATCH, 3 NO_TRADE (VIC does not fit one lot of 100 at these weights on 1 bn; DGW's R:R is 1.26) — BUY / WATCH in `recommendations` (linked to the stored predictions of the final SWING model), texts and JSON in `artifacts/reco/live/` | `python -m predict_stock reco generate` |
+
+### Result (walk-forward window 2021-08-11 → 2025-05-16, net of costs; the cards exactly as issued)
+
+| | CAGR | Sharpe | max DD | gross CAGR |
+|---|---|---|---|---|
+| **Combined portfolio (cards, kill-switch)** | 2.7% | 0.24 | -42% | 4.6% |
+| Combined, no kill-switch | 0.2% | 0.12 | -49% | |
+| Equal-weight universe | 5.9% | 0.36 | -48% | 6.0% |
+| Momentum 6-12 m | 1.5% | 0.19 | -58% | 3.6% |
+| VN30 / VNINDEX buy & hold (price) | -2.0% / -1.2% | 0.00 / 0.03 | -42% / -40% | |
+
+* Sharpe minus equal-weight **-0.13 [-0.62, +0.34]** (90% block bootstrap), minus VN30 +0.24 [-0.35, +0.82], minus VNINDEX +0.21 [-0.32, +0.69]; at 2× costs the combined Sharpe is -0.12. The combined portfolio is ahead of the two indices in most rolling windows (the indices fell in this window) and behind equal-weight in 39% of 1-year and 0% of 3-year windows.
+* **Kill-switch** (20% drawdown) fired twice (2022-05-09, 2022-10-11); drawdown -42% vs -49% without it. One path: an illustration only.
+* **Sleeves inside the shared book** (with / without kill-switch, % of capital): SWING +7.3% / +2.9%, INVEST B1 +3.4% / +3.3%, INVEST B2 -0.2% / -5.3%. They are not additive with the "run alone" figures (weights are shares of current equity).
+* **SWING cards**: 4,965 BUY cards → 1,208 orders (the rest were for stocks already held, sleeve full, or kill-switch) → 71% filled → 856 trades. Ended: 34% reached target 2, 22% target 1 then the break-even stop, **36% the original stop**, 6% time-stop, 1% kill-switch. Holding time 4.0 sessions against 4.1 stated.
+* **Stated vs realised R:R**: stated 1.93 R to target 2, realised expectancy **0.00 R** per trade (win rate 60%, average win 0.89 R, average loss 1.33 R, profit factor 1.08). Trades that ended at the original stop lost **1.43 R** on average, not 1 R: 34% of them were gap-throughs at the open (a stop cannot fire during T+2, so a fall in the first two sessions is executed at the first sellable session), fills averaged 1.33% below the stated stop.
+* **Stated probability vs realised**: 31.0% stated vs 34.3% realised (ECE 0.078, AUC 0.499). The policy graded **all** 4,965 cards THẤP (past out-of-sample AUC 0.51-0.53 < 0.55) and showed the historical win rate of similar signals with n instead of the model probability; quoting the trailing realised rate would have ECE 0.048 (better calibrated, but the same for every card).
+* **Sizing**: the loss-if-stop budget is 0.75% of capital but the 5% per-name cap bound on **every** card (mean weight 4.9%, mean loss if the stop is hit 0.20%): with 1-ATR stops of 2-4% the cap, not the risk budget, sets the size.
+* **INVEST cards**: 250 (B1) and 160 (B2) BUY cards incl. second tranches, fill rate 98% / 99%; the realised horizon return fell below the cards' bear / base / bull in 15 / 58 / 91% (B1) and 25 / 56 / 92% (B2) of cases (nominal 10 / 50 / 90).
+* **Cross-sleeve overlap**: the same stock was a target of SWING and INVEST in 434 cases (107 days); the largest combined target weight was 12.0% against the 15% cap; positions are tracked per sleeve.
+
+### Acceptance
+* Every issued card has entry, target (or scenarios + thesis-break conditions), rationale and holding time; a card that cannot is NO_TRADE with the reason (1,098 in the backtest, 1,066 of them R:R below 1.5). Unit tests: tick rounding on every price band, zone clamped inside ±7%, breakout trigger above the ceiling rejected, T+2 earliest sale and validity across holidays, R:R gate and resistance cap, limit fills / no chasing exactly as the card states, tranches, sizing in lots and caps, aggregator limits, kill-switch state, display grade, evidence point-in-time, DB round trip. 704 tests pass.
+
+### Bugs and design mistakes found while building it (kept on purpose)
+1. **The factor score's explanation was mislabelled** (Phase 6, fixed): the contributions of the rule-based score are computed on cross-sectional RANKS but were named after the raw features ("volatility = 96%" for a rank of 0.96). Now named after the rank columns; the stored `predictions.details` of the factor candidate were refreshed by re-running `invest run` (scores and model files identical).
+2. **A diagnostic that contradicted itself**: the first "stop fill vs stop" figure mixed original stops with the break-even stops that follow target 1 (fills looked *above* the stop). It now uses original stops only; the per-outcome table shows what each ending earned.
+3. **Sleeve attribution**: running each sleeve alone does not add up to the combined book (sizing follows current equity). The report now shows both, and says so.
+4. **The risk budget never binds** (see above) — a consequence of the pre-registered caps, reported, not changed.
+5. Reasons must not invent: the text builder only prints facts present in the data (a test removes RSI / volume / SMA / relative strength and checks they vanish from the text).
+
+### Limits and assumptions
+* All limits of Phases 4-6 apply (LARGE50 hindsight, adjusted prices, inferred bands, T+2 for the whole period, brief-default costs, no market impact). The models behind the cards **failed** their pre-registered criteria; every card shows that. `reco.gate_on_verdict: true` would turn every BUY of such a sleeve into WATCH.
+* 3.75 years, one path: all intervals include zero. The rules were fixed before the backtest and were not tuned to it; sensitivity to the entry style, stop multiple or R:R gate was not explored.
+* Live cards use the final models trained before the held-out period; they are forward-looking and nothing after their date is evaluated. Live prices are the vendor's; the next session's band is taken from the inferred band.
+* INVEST EXIT / REDUCE orders at a rebalance are part of the backtest but are not cards (`recommendations.action` here holds BUY / WATCH; NO_TRADE cards are kept in the report and JSON, not in the table).
+* Paper trading only: no order is placed anywhere.
+
+### How to run
+```bash
+make reco                                                  # cards for the latest session + the backtest of the cards, about 3 minutes
+python -m predict_stock reco generate --as-of 2026-09-18   # cards only (BUY / WATCH into `recommendations`)
+python -m predict_stock reco backtest                      # backtest + docs/RECOMMENDATIONS.md
+python -m predict_stock reco report                        # rewrite the report from the stored run
+```

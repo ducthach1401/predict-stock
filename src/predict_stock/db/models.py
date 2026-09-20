@@ -561,7 +561,7 @@ class Recommendation(Base):
     instrument_id: Mapped[int] = mapped_column(BigPK, ForeignKey("instruments.id"))
     universe_id: Mapped[int | None] = mapped_column(BigPK, ForeignKey("universes.id"))
     as_of_date: Mapped[date] = mapped_column(Date)
-    action: Mapped[str] = mapped_column(String(8))  # BUY | EXIT (long-only)
+    action: Mapped[str] = mapped_column(String(8))  # BUY | WATCH | NO_TRADE | EXIT (long-only; NO_TRADE cards are kept out of this table, with their reason, in the run's report)
     entry_price: Mapped[float] = mapped_column(PRICE)
     target_price: Mapped[float] = mapped_column(PRICE)
     stop_loss: Mapped[float] = mapped_column(PRICE)
@@ -576,6 +576,9 @@ class Recommendation(Base):
     status: Mapped[str] = mapped_column(String(12), server_default="open")
     run_id: Mapped[int | None] = mapped_column(BigPK, ForeignKey("job_runs.id"))
     created_at: Mapped[datetime] = _created()
+    valid_until: Mapped[date | None] = mapped_column(Date)  # last session on which the order may still be placed
+    card: Mapped[dict | None] = mapped_column(JSON)  # the full structured card
+    card_text: Mapped[str | None] = mapped_column(Text)  # the Vietnamese text of the card
 
 
 class RecommendationOutcome(Base):

@@ -188,3 +188,50 @@ invest:
   fundamental_prefixes: ["fund_"]
   artifacts_dir: artifacts/models
   report_dir: docs
+
+# ---- Recommendation cards & combined portfolio (Phase 7) --------------------------------------------------
+reco:
+  # SWING rules: fixed BEFORE the recommendations were backtested; nothing here was fitted to the backtest.
+  swing:
+    max_positions: 6            # new cards per day = open positions (30% sleeve / 5% per name)
+    entry_style: auto           # auto | pullback | breakout | ato
+    breakout_within_pct: 0.02   # auto: breakout if the close is within 2% of the 20-session high, else pullback
+    breakout_buffer_atr: 0.10
+    breakout_zone_atr: 0.30     # no chasing above trigger + 0.3 ATR
+    pullback_atr: [0.60, 0.15]  # limit zone = close - (0.60 .. 0.15) ATR
+    ato_zone_pct: [-0.01, 0.01]
+    stop_atr: 1.0
+    target1_atr: 1.0
+    target2_atr: 2.0            # the barrier of the model's probability (2 ATR before 1 ATR within 10 sessions)
+    use_resistance: true        # targets capped just under the highest high of the last 60 sessions when it lies above the entry
+    resistance_lookback: 60
+    t1_fraction: 0.5
+    breakeven_after_t1: true
+    max_hold: 10
+    expected_hold_cap: 10
+    min_rr: 1.5                 # reward:risk to target 2 below this: no card
+    validity_sessions: 3
+    risk_per_trade: 0.0075      # 0.75% of total capital lost if the stop is hit
+    max_weight: 0.05
+  invest:
+    entry_zone_pct: [-0.02, 0.005]
+    validity_sessions: 5
+    max_weight: 0.10
+    watch_ranks: 5
+    time_review_multiple: 1.0
+  portfolio:
+    capital: 1000000000
+    allocation: {swing: 0.30, invest: 0.70}
+    invest_split: {b1: 0.5, b2: 0.5}
+    max_weight_name: 0.15
+    max_open_risk: 0.05
+    kill_drawdown: 0.20
+    kill_cooldown: 21
+  card_model: {b1: factor, b2: factor}
+  similar_min_n: 30
+  evidence_min_rows: 3000
+  evidence_auc_ok: 0.55
+  gate_on_verdict: false        # paper trading; true = a sleeve whose model failed its pre-registered criteria may only WATCH
+  kill_switch: true
+  report_path: docs/RECOMMENDATIONS.md
+  artifacts_dir: artifacts/reco

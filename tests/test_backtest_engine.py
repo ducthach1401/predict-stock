@@ -461,3 +461,210 @@ def test_no_cap_by_default(rules):
     d = _two_names()
     sig = Signal([SignalItem(i, 0.1) for i in (1, 2, 3)], full_rebalance=False)
     assert len(go(d, {0: sig}, rules).fills) == 3
+
+
+# ---- order types of the recommendation cards ------------------------------------------------------------------------------------------------
+def world(o, h=None, l=None, c=None):
+    return make_data(o, h=h if h is not None else o, l=l if l is not None else o, c=c if c is not None else o)
+
+
+def one_buy(**kw):
+    return {0: Signal([SignalItem(1, 0.01, **kw)], full_rebalance=False)}
+
+
+def test_a_limit_order_with_an_explicit_price_fills_at_the_better_of_limit_and_open_when_the_low_reaches_it(rules):
+    d = world([20000, 20000, 20000, 20000], h=[20100] * 4, l=[19900, 19700, 19900, 19900], c=[20000] * 4)
+    r = go(d, one_buy(order="limit", limit_price=19800, valid_sessions=1), rules)
+    f = r.fills.iloc[0]
+    assert (f["idx"], f["price"], f["kind"]) == (1, 19800, "limit")                       # low 19,700 reached 19,800: fills at the limit, not at the open
+
+
+def test_a_limit_buy_below_the_market_does_not_fill_when_the_low_never_reaches_it_and_expires(rules):
+    d = world([20000] * 5, h=[20100] * 5, l=[19900] * 5, c=[20000] * 5)
+    r = go(d, one_buy(order="limit", limit_price=19500, valid_sessions=3), rules)
+    assert len(r.fills) == 0 and r.orders.iloc[0]["status"] == "unfilled" and r.stats["blocked"]["limit_not_reached"] == 3
+
+
+def test_a_limit_above_the_open_fills_at_the_open_price_not_at_the_limit(rules):
+    d = world([20000, 19600, 19600, 19600], h=[20100, 19700, 19700, 19700], l=[19900, 19500, 19500, 19500], c=[20000] * 4)
+    r = go(d, one_buy(order="limit", limit_price=19800), rules)
+    assert r.fills.iloc[0]["price"] == 19600
+
+
+def test_a_breakout_buy_stop_fills_at_the_trigger_when_the_high_reaches_it(rules):
+    d = world([20000, 20000, 20000, 20000], h=[20100, 20600, 20100, 20100], l=[19900] * 4, c=[20000] * 4)
+    r = go(d, one_buy(order="stop", trigger_price=20500, valid_sessions=2), rules)
+    f = r.fills.iloc[0]
+    assert (f["idx"], f["price"], f["kind"]) == (1, 20500, "stop")
+
+
+def test_a_breakout_that_gaps_through_the_trigger_fills_at_the_open(rules):
+    d = world([20000, 20800, 20800, 20800], h=[20100, 20900, 20900, 20900], l=[19900, 20700, 20700, 20700], c=[20000] * 4)
+    r = go(d, one_buy(order="stop", trigger_price=20500), rules)
+    assert r.fills.iloc[0]["price"] == 20800
+
+
+def test_a_breakout_does_not_fill_above_the_zone_high_and_does_not_trigger_below_the_trigger(rules):
+    d = world([20000, 20800, 20800], h=[20100, 20900, 20900], l=[19900, 20700, 20700], c=[20000] * 3)
+    r = go(d, one_buy(order="stop", trigger_price=20500, zone_high=20600), rules)
+    assert len(r.fills) == 0 and r.stats["blocked"]["above_zone"] >= 1
+    d2 = world([20000] * 4, h=[20100] * 4, l=[19900] * 4, c=[20000] * 4)
+    r2 = go(d2, one_buy(order="stop", trigger_price=20500, valid_sessions=2), rules)
+    assert len(r2.fills) == 0 and r2.stats["blocked"]["trigger_not_reached"] == 2
+
+
+def test_an_order_is_cancelled_not_chased_when_a_session_opens_above_the_zone(rules):
+    d = world([20000, 21000, 20000, 20000, 20000], h=[20100, 21100, 20100, 20100, 20100], l=[19900, 20900, 19900, 19900, 19900], c=[20000] * 5)
+    r = go(d, one_buy(order="limit", limit_price=20500, cancel_if_open_above=20500, valid_sessions=4), rules)
+    assert len(r.fills) == 0                                                              # session 2 would have filled at 20,000, but the order died at the gap
+    assert r.orders.iloc[0]["status"] == "cancelled" and r.stats["blocked"]["gap_above_zone"] == 1
+
+
+def test_ato_fills_at_the_open_only_inside_the_zone(rules):
+    inside = world([20000, 20100, 20100, 20100])
+    outside = world([20000, 20900, 20900, 20900])
+    assert go(inside, one_buy(order="ato", zone_low=19800, zone_high=20300), rules).fills.iloc[0]["price"] == 20100
+    r = go(outside, one_buy(order="ato", zone_low=19800, zone_high=20300), rules)
+    assert len(r.fills) == 0 and r.stats["blocked"]["open_outside_zone"] == 1
+
+
+def test_stop_and_ato_orders_need_their_parameters(rules):
+    d = world([20000] * 3)
+    with pytest.raises(ValueError, match="trigger_price"):
+        go(d, one_buy(order="stop"), rules)
+    with pytest.raises(ValueError, match="zone"):
+        go(d, one_buy(order="ato"), rules)
+
+
+# ---- two targets, partial sale, break-even stop --------------------------------------------------------------------------------------------------
+def two_targets(h, l=None, o=None, n=None):
+    n = n or len(h)
+    return world(o or [20000] * n, h=h, l=l or [19900] * n, c=[20000] * n)
+
+
+KW = dict(stop_pct=0.05, target1_pct=0.03, target_pct=0.06, target1_fraction=0.5, breakeven_after_t1=True)      # stop 19,000 / T1 20,600 / T2 21,200
+
+
+def test_target_one_sells_half_in_whole_lots_and_target_two_sells_the_rest(rules):
+    h = [20100, 20100, 20100, 20700, 20700, 21300, 20100]
+    o = [20000, 20000, 20000, 20000, 20300, 20300, 20300]                                    # after target 1 the market stays above the break-even stop
+    l = [19900, 19900, 19900, 19900, 20250, 20250, 20250]
+    r = go(two_targets(h, l, o), one_buy(**KW), rules)
+    sells = r.fills[r.fills.side == "sell"]
+    assert list(zip(sells["idx"], sells["qty"], sells["price"], sells["reason"])) == [(3, 200, 20600, "target1"), (5, 300, 21200, "target")]
+    assert r.fills[r.fills.side == "buy"].iloc[0]["qty"] == 500 and len(r.round_trips) == 1
+
+
+def test_after_target_one_the_stop_moves_to_the_entry_from_the_next_session(rules):
+    # session 3 reaches T1 (20,700 high) and, later in the same bar, falls back to 19,400: the NEW stop (20,000) is not active yet, the old one (19,000) was not touched
+    h = [20100, 20100, 20100, 20700, 20100, 20100, 20100]
+    l = [19900, 19900, 19900, 19400, 19900, 19900, 19900]
+    o = [20000, 20000, 20000, 20000, 20100, 20100, 20100]
+    r = go(two_targets(h, l, o), one_buy(**KW), rules)
+    assert [x for x in r.fills[r.fills.side == "sell"]["reason"]] == ["target1", "stop"]
+    stop_fill = r.fills[r.fills.reason == "stop"].iloc[0]
+    assert stop_fill["idx"] == 4 and stop_fill["price"] == 20000                            # session 4: low 19,900 <= 20,000 -> out at break-even
+
+
+def test_without_break_even_the_original_stop_stays(rules):
+    h = [20100, 20100, 20100, 20700, 20100, 20100, 20100]
+    kw = {**KW, "breakeven_after_t1": False}
+    r = go(two_targets(h, o=[20000, 20000, 20000, 20000, 20100, 20100, 20100]), one_buy(**kw), rules)
+    assert list(r.fills[r.fills.side == "sell"]["reason"]) == ["target1"] and r.stats["open_positions"] == 1
+
+
+def test_a_position_too_small_to_split_skips_the_partial_sale(rules):
+    h = [20100, 20100, 20100, 20700, 20700, 21300]
+    sig = {0: Signal([SignalItem(1, 0.0025, **KW)], full_rebalance=False)}                  # 250 shares -> half = 100 shares... 2.5m / 20,000 = 100
+    r = go(two_targets(h), sig, rules)
+    sells = r.fills[r.fills.side == "sell"]
+    assert r.fills[r.fills.side == "buy"].iloc[0]["qty"] == 100
+    assert list(sells["reason"]) == ["target"] and sells.iloc[0]["qty"] == 100               # one lot cannot be split: everything goes at target 2
+
+
+def test_the_stop_wins_a_bar_that_touches_both_the_stop_and_target_one(rules):
+    h = [20100, 20100, 20100, 20700]
+    l = [19900, 19900, 19900, 18900]
+    r = go(two_targets(h, l), one_buy(**KW), rules)
+    assert list(r.fills[r.fills.side == "sell"]["reason"]) == ["stop"]
+
+
+def test_opening_through_target_one_sells_the_partial_at_the_open(rules):
+    o = [20000, 20000, 20000, 20800, 20800]
+    h = [20100, 20100, 20100, 20900, 20900]
+    r = go(two_targets(h, o=o), one_buy(**KW), rules)
+    first = r.fills[r.fills.side == "sell"].iloc[0]
+    assert (first["idx"], first["price"], first["reason"]) == (3, 20800, "target1_gap")
+
+
+def test_both_targets_in_one_bar_sell_the_partial_then_the_rest(rules):
+    h = [20100, 20100, 20100, 21300]
+    r = go(two_targets(h), one_buy(**KW), rules)
+    assert list(r.fills[r.fills.side == "sell"]["reason"]) == ["target1", "target"] and r.stats["open_positions"] == 0
+
+
+def test_t_plus_2_applies_to_the_targets_too(rules):
+    h = [20100, 21300, 21300, 21300]                                                        # T2 is reachable already on session 1 (the buy) and 2, but shares are not sellable yet
+    r = go(two_targets(h), one_buy(**KW), rules)
+    assert r.fills[r.fills.side == "sell"].iloc[0]["idx"] == 3
+
+
+# ---- tags -------------------------------------------------------------------------------------------------------------------------------------------
+def test_the_tag_follows_the_order_the_fills_and_the_round_trip(rules):
+    h = [20100, 20100, 20100, 21300]
+    r = go(two_targets(h), one_buy(tag="card-42", **KW), rules)
+    assert set(r.fills["tag"]) == {"card-42"} and r.orders.iloc[0]["tag"] == "card-42" and r.round_trips.iloc[0]["tag"] == "card-42"
+    assert r.round_trips.iloc[0]["avg_entry"] == 20000 and r.round_trips.iloc[0]["qty"] == 500
+
+
+# ---- kill switch ------------------------------------------------------------------------------------------------------------------------------------
+def crash_world():
+    o = [20000, 20000, 20000, 20000, 15000, 15000, 15000, 15000, 15000, 15000, 15000, 15000]
+    return world(o, h=[x + 50 for x in o], l=[x - 50 for x in o], c=o)
+
+
+def test_a_drawdown_beyond_the_limit_sells_everything_and_blocks_new_buys_for_the_cooldown(rules):
+    sigs = {0: Signal([SignalItem(1, 0.9)], full_rebalance=False), 5: Signal([SignalItem(1, 0.9)], full_rebalance=False), 10: Signal([SignalItem(1, 0.9)], full_rebalance=False)}
+    r = go(crash_world(), sigs, rules, kill_drawdown=0.20, kill_cooldown=4)
+    assert r.stats["kill_events"] and r.fills[r.fills.reason == "kill_switch"].shape[0] == 1
+    assert r.stats["blocked"]["kill_switch"] == 1                                            # the buy decided during the cooldown was ignored
+    buys = r.fills[r.fills.side == "buy"]
+    assert list(buys["idx"]) == [1, 11]                                                       # the signal at 10 (after the cooldown) is honoured
+    assert r.equity.iloc[8] == pytest.approx(r.equity.iloc[7], rel=1e-9)                     # flat while killed: the equity no longer moves with the price
+
+
+def test_without_a_kill_limit_nothing_changes(rules):
+    sigs = {0: Signal([SignalItem(1, 0.9)], full_rebalance=False)}
+    a = go(crash_world(), sigs, rules)
+    b = go(crash_world(), sigs, rules, kill_drawdown=None)
+    pd.testing.assert_series_equal(a.equity, b.equity)
+    assert a.stats["kill_events"] == []
+
+
+def test_the_kill_switch_resets_the_peak_after_the_cooldown(rules):
+    sigs = {0: Signal([SignalItem(1, 0.9)], full_rebalance=False), 8: Signal([SignalItem(1, 0.9)], full_rebalance=False)}
+    r = go(crash_world(), sigs, rules, kill_drawdown=0.20, kill_cooldown=3)
+    assert len(r.stats["kill_events"]) == 1                                                   # after resuming, the old peak is not held against the new position
+
+
+# ---- absolute levels and group caps ------------------------------------------------------------------------------------------------------------
+def test_absolute_stop_and_targets_are_used_as_given_whatever_the_fill_price(rules):
+    d = world([20000, 19800, 19800, 19800, 20500, 21000], h=[20100, 19900, 19900, 20700, 20700, 21400], l=[19900, 19700, 19700, 19700, 20400, 20900], c=[19800] * 6)
+    kw = dict(order="limit", limit_price=19800, stop_price=19000, target1_price=20500, target_price=21200, target1_fraction=0.5, valid_sessions=2)
+    r = go(d, one_buy(**kw), rules)
+    assert r.fills[r.fills.side == "buy"].iloc[0]["price"] == 19800
+    sells = r.fills[r.fills.side == "sell"]
+    assert list(zip(sells["reason"], sells["price"])) == [("target1", 20500), ("target", 21200)]      # levels are the card's prices, not percentages of the 19,800 fill
+
+
+def test_position_groups_have_their_own_caps(rules):
+    d = _two_names(8)
+    sig = Signal([SignalItem(1, 0.1, group="a"), SignalItem(2, 0.1, group="a"), SignalItem(3, 0.1, group="b")], full_rebalance=False)
+    r = go(d, {0: sig}, rules, max_positions_by_group={"a": 1, "b": 1})
+    assert sorted(r.fills[r.fills.side == "buy"]["instrument_id"]) == [1, 3] and r.stats["blocked"]["max_positions_group"] == 1
+
+
+def test_only_if_flat_skips_are_counted(rules):
+    d = make_data(o=[20000] * 6)
+    r = go(d, {0: buy(0.1, only_if_flat=True), 1: buy(0.1, only_if_flat=True), 2: buy(0.1, only_if_flat=True)}, rules)
+    assert r.stats["blocked"]["already_held_or_pending"] == 2
