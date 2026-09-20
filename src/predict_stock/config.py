@@ -218,6 +218,89 @@ class SwingConfig(_Strict):
     report_path: str = "docs/SWING.md"
 
 
+class InvestPreset(_Strict):
+    label: str
+    horizon: int  # sessions: forward-return label horizon AND the embargo between training and test windows
+    rebalance: str  # weekly | monthly | quarterly
+    tranches: int = 2  # a rebalance is carried out in this many equal steps
+    tranche_spacing: int = 5  # sessions between the steps
+    drawdown_break: float = 0.15  # thesis-break condition: drawdown from the 252-session high beyond this
+
+
+class InvestFolds(_Strict):
+    train_min_sessions: int = 500
+    test_sessions: int = 125
+    step_sessions: int = 125
+    val_sessions: int = 125  # last sessions of each training window (early stopping / hyper-parameter grid); its labels are purged like any other
+
+
+class InvestRegime(_Strict):
+    symbol: str = "VN30"
+    fallback: str = "VNINDEX"  # used where the symbol has no 200-session average yet (VN30 exists only from 2020-05)
+    sma_window: int = 200
+    equity_share: float = 0.5  # share of the target stock weights kept when the index is below its average; the rest stays in cash
+
+
+class InvestDca(_Strict):
+    monthly_contribution: float = 10_000_000.0  # VND, invested on the first session of each month
+    initial: float = 0.0
+
+
+class InvestBootstrap(_Strict):
+    resamples: int = 2000
+    block: int = 21  # mean block length of the stationary bootstrap (sessions)
+    level: float = 0.90  # two-sided confidence level
+    seed: int = 20260920
+
+
+class InvestDecision(_Strict):
+    """PRE-REGISTERED (written to `experiments` before any INVEST model is trained). Judged for the candidate with the best net Sharpe of each preset."""
+
+    reality_check_p: float = 0.10  # White's reality check over the candidates: p-value that the best one has no edge over equal-weight (Sharpe difference)
+    min_ic_tstat: float = 2.0
+    min_rolling_share: float = 0.60  # share of rolling 1-year windows in which the strategy's net return beats equal-weight
+    stress_cost_multiple: float = 2.0
+
+
+class InvestConfig(_Strict):
+    feature_set: str = "invest:2"
+    label_spec: str = "invest:1"
+    presets: dict[str, InvestPreset] = Field(default_factory=lambda: {
+        "b1": InvestPreset(label="INVEST B1 (1-3 months)", horizon=63, rebalance="monthly", tranches=2, tranche_spacing=5, drawdown_break=0.15),
+        "b2": InvestPreset(label="INVEST B2 (6-12+ months)", horizon=126, rebalance="quarterly", tranches=2, tranche_spacing=10, drawdown_break=0.25)})
+    candidates: list[str] = Field(default_factory=lambda: ["factor", "ridge", "elasticnet", "lgbm"])
+    # the rule-based composite, fixed BEFORE any result was seen: (cross-sectional-rank column, sign). No parameter is fitted.
+    factors: list[tuple[str, int]] = Field(default_factory=lambda: [("mom_6m_csrank", 1), ("mom_12m_csrank", 1), ("vol_126_csrank", -1),
+                                                                      ("sma_ratio_200_csrank", 1), ("dd_252_csrank", 1)])
+    ridge_alphas: list[float] = Field(default_factory=lambda: [1.0, 10.0, 100.0, 1000.0, 10000.0])
+    enet_alphas: list[float] = Field(default_factory=lambda: [0.0005, 0.002, 0.01, 0.05])
+    enet_l1_ratios: list[float] = Field(default_factory=lambda: [0.2, 0.5, 0.9])
+    lgbm: dict = Field(default_factory=lambda: {"learning_rate": 0.03, "num_leaves": 4, "max_depth": 2, "min_child_samples": 400, "lambda_l2": 50.0,
+                                                 "feature_fraction": 0.7, "bagging_fraction": 0.7, "bagging_freq": 5})
+    n_estimators: int = 400
+    early_stopping_rounds: int = 40
+    quantiles: list[float] = Field(default_factory=lambda: [0.1, 0.5, 0.9])
+    seed: int = 42
+    num_threads: int = 4
+    folds: InvestFolds = Field(default_factory=InvestFolds)
+    top_k: int = 10
+    weighting: str = "equal"  # equal | inverse_vol | risk_parity | min_variance | hrp
+    max_weight: float = 0.15
+    cov_window: int = 252  # trailing sessions for the covariance-based weightings (point-in-time)
+    regime: InvestRegime = Field(default_factory=InvestRegime)
+    dca: InvestDca = Field(default_factory=InvestDca)
+    bootstrap: InvestBootstrap = Field(default_factory=InvestBootstrap)
+    decision: InvestDecision = Field(default_factory=InvestDecision)
+    rolling_windows: list[int] = Field(default_factory=lambda: [252, 756])
+    thesis_rs_floor: float = 0.40  # thesis-break: cross-sectional rank of 6-month momentum (relative strength) below this
+    sensitivity_k: list[int] = Field(default_factory=lambda: [8, 10, 15])
+    sensitivity_weighting: list[str] = Field(default_factory=lambda: ["inverse_vol", "risk_parity", "min_variance", "hrp"])
+    sensitivity_tranches: list[int] = Field(default_factory=lambda: [1, 3])
+    fundamental_prefixes: list[str] = Field(default_factory=lambda: ["fund_"])  # feature columns starting with these get their own ablation report
+    artifacts_dir: str = "artifacts/models"
+    report_dir: str = "docs"
+
+
 class AppConfig(_Strict):
     seed: int = 42
     market: MarketConfig = Field(default_factory=MarketConfig)
@@ -230,6 +313,7 @@ class AppConfig(_Strict):
     datasets: DatasetConfig = Field(default_factory=DatasetConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     swing: SwingConfig = Field(default_factory=SwingConfig)
+    invest: InvestConfig = Field(default_factory=InvestConfig)
 
     def snapshot(self) -> dict:
         """JSON-serialisable copy for job_runs.config_snapshot (contains no secrets)."""

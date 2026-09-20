@@ -236,3 +236,9 @@ def test_random_baselines_are_not_counted_as_the_baseline_to_beat_and_the_best_o
     base = {"equal_weight": summ(0.9), "mom_long": summ(1.0), "random_weekly": summ(5.0)}
     out = decide(summ(0.95), base, NOISE, IC, RULE)
     assert not out["passed"] and out["criteria"][0]["detail"] == "best baseline: mom_long" and out["criteria"][0]["threshold"] == 1.0
+
+
+def test_label_known_before_drops_rows_whose_label_ends_inside_the_held_out_period():
+    from predict_stock.swing.job import label_known_before
+    d = pd.DataFrame({"tb_end": pd.to_datetime(["2025-09-10", "2025-09-18", "2025-09-19", "2025-09-26", None])})
+    assert list(label_known_before(d, "tb_end", pd.Timestamp("2025-09-19")).index) == [0, 1]           # ending ON the first held-out day is already inside it

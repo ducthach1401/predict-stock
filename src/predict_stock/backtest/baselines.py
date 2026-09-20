@@ -62,11 +62,16 @@ INDEX_KEYS = [k for k, b in BASELINES.items() if b.kind == "index"]
 
 
 def rebalance_sessions(calendar: pd.DatetimeIndex, freq: str, first: int, last: int) -> list[int]:
-    """Session indices in [first, last] on which a rebalance decision is made: the first session of each ISO week / month."""
+    """Session indices in [first, last] on which a rebalance decision is made: the first session of each ISO week / month / calendar quarter."""
     out, prev = [], None
     for i in range(first, last + 1):
         d = calendar[i]
-        key = (d.isocalendar().year, d.isocalendar().week) if freq == "weekly" else (d.year, d.month)
+        if freq == "weekly":
+            key = (d.isocalendar().year, d.isocalendar().week)
+        elif freq == "quarterly":
+            key = (d.year, (d.month - 1) // 3)
+        else:
+            key = (d.year, d.month)
         if key != prev:
             out.append(i)
             prev = key

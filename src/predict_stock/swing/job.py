@@ -45,6 +45,12 @@ AMENDMENTS = [
      "change": "the entry threshold is a multiple of the base rate of the validation rows the calibrator was fitted on",
      "affects": "the secondary (barrier) strategy and its sensitivities only",
      "first_run_result": "barrier trades: net CAGR 4.4%, Sharpe 0.32, no position at all in the test windows of folds 5, 6, 9 and 10"},
+    {"id": 3, "made_after": "Phase 6 review of the same issue (2026-09-20)",
+     "found": "the IC, quantile, calibration and holding-time figures used forward labels (5 / 10 sessions) of the last development days, whose windows end after 2025-09-19: up to 10 sessions of held-out prices "
+              "entered those figures through the labels (the portfolio backtests stop before the held-out period and were not affected)",
+     "change": "those figures use only rows whose label ends before the held-out period",
+     "affects": "IC / quantile / calibration / holding-time figures by a few last days of the last fold; not the models, not the primary strategy, not the verdict",
+     "first_run_result": "IC 0.0552 (t 4.41), ECE raw 0.0694 / isotonic 0.0722 before the change"},
 ]
 
 
@@ -185,10 +191,13 @@ def run_swing(engine: Engine, cfg: AppConfig, *, trials: int | None = None, nois
         windows = [f.as_dict() for f in folds]
         first_idx = int(setup.calendar.get_loc(folds[0].test_start))
         mults = list(setup.cfg.backtest.cost_multipliers)
-        ic = _ic_report(preds, frame, sw)
-        calib = _calibration_report(preds, sw)
-        quant = SM.quantile_report(preds, sw.return_target, tuple(sw.quantiles))
-        hold = SM.holding_report(preds, sw.hold_column)
+        h = int(sw.return_target.rsplit("_", 1)[1])
+        ev_ret = label_known_before(preds, f"fwd_end_{h}", holdout.start)          # no held-out price may enter a figure through a forward label
+        ev_tb = label_known_before(preds, "tb_end", holdout.start)
+        ic = _ic_report(ev_ret, frame, sw)
+        calib = _calibration_report(ev_tb, sw)
+        quant = SM.quantile_report(ev_ret, sw.return_target, tuple(sw.quantiles))
+        hold = SM.holding_report(ev_tb, sw.hold_column)
         st = sw.strategy
         cal_idx = setup.calendar
         sig_a = topk_signals(preds, cal_idx, first_idx, setup.dev_end_idx, k=st.top_k, max_weight=cfg.backtest.max_weight, rebalance=st.rebalance)
@@ -231,6 +240,12 @@ def run_swing(engine: Engine, cfg: AppConfig, *, trials: int | None = None, nois
         from predict_stock.swing.report import write_report
         write_report(cfg, payload, equities, engine)
     return {"payload": payload, "equities": equities, "predictions": preds, "run_id": run_id}
+
+
+def label_known_before(preds: pd.DataFrame, end_col: str, start: pd.Timestamp) -> pd.DataFrame:
+    """Rows whose label ends BEFORE ``start`` (the held-out period): a label that ends inside it would carry held-out prices into an evaluation figure."""
+    end = pd.to_datetime(preds[end_col])
+    return preds[end.notna() & (end < pd.Timestamp(start))]
 
 
 def _importance(bundle) -> list[dict]:

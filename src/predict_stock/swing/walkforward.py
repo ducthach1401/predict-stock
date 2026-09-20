@@ -12,7 +12,7 @@ from predict_stock.config import SwingConfig
 from predict_stock.swing.folds import FoldData, plan_folds, split_fold
 from predict_stock.swing.model import SwingBundle, feature_columns, fit_bundle
 
-CARRY = ["fwd_ret_3", "fwd_ret_5", "fwd_rank_5", "tb_label", "tb_time", "tb_ret", "tb_end", "atr_pct_14"]
+CARRY = ["fwd_ret_3", "fwd_ret_5", "fwd_rank_5", "fwd_end_3", "fwd_end_5", "tb_label", "tb_time", "tb_ret", "tb_end", "atr_pct_14"]
 
 
 @dataclass

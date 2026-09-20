@@ -97,6 +97,16 @@ def build_parser() -> argparse.ArgumentParser:
     bo.add_argument("--final", action="store_true", help="required: confirms this is the single final evaluation")
     bt.add_parser("list", help="the baselines")
 
+    # ---- invest strategies
+    iv = sub.add_parser("invest", help="INVEST B1 / B2: walk-forward, evaluation against the baselines with bootstrap intervals").add_subparsers(dest="cmd", required=True)
+    ir = iv.add_parser("run", help="pre-register, grid once, walk-forward, evaluate, report, DB")
+    ir.add_argument("--preset", action="append", help="b1 or b2 (repeatable; default: both)")
+    ir.add_argument("--noise-seeds", type=int, default=20, help="random portfolios for the noise floor")
+    ir.add_argument("--no-report", action="store_true", help="do not write docs/INVEST_B*.md and the charts")
+    io = iv.add_parser("oos", help="evaluate the HELD-OUT period for the passing preset(s) and all baselines. Only after a PASS; allowed once")
+    io.add_argument("--final", action="store_true", help="required: confirms this is the single final evaluation")
+    iv.add_parser("report", help="rewrite docs/INVEST_B1.md / INVEST_B2.md from the latest stored runs (no training)")
+
     # ---- swing model
     sw = sub.add_parser("swing", help="SWING model: walk-forward, evaluation against the baselines").add_subparsers(dest="cmd", required=True)
     sr = sw.add_parser("run", help="pre-register, tune once, walk-forward, evaluate against the baselines, report, DB")
@@ -182,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
         return _backtest(args, cfg, engine)
     if args.group == "swing":
         return _swing(args, cfg, engine)
+    if args.group == "invest":
+        return _invest(args, cfg, engine)
     if args.group == "calendar":
         with session_scope(engine) as s:
             if args.cmd == "sync":
@@ -251,6 +263,46 @@ def _backtest(args, cfg: AppConfig, engine) -> int:
         n, g = r["net"], r["gross"]
         print(f"{k:18s} {n['cagr'] * 100:8.1f}% {n['sharpe']:10.2f} {n['max_drawdown'] * 100:6.1f}% {g['cagr'] * 100:9.1f}% {g['sharpe']:12.2f}")
     print(f"stored experiments: {out['experiments']}" + ("" if args.no_report else f"\nreport: {cfg.backtest.report_path}"))
+    return 0
+
+
+def _invest(args, cfg: AppConfig, engine) -> int:
+    from predict_stock.invest.job import run_invest
+    if args.cmd == "report":
+        from predict_stock.invest.report import rewrite_latest
+        print("\n".join(rewrite_latest(cfg)))
+        return 0
+    if args.cmd == "oos":
+        from predict_stock.invest.job import HoldoutClosed, run_invest_oos
+        if not args.final:
+            print("error: the held-out period can be evaluated ONCE; add --final to confirm this is the final evaluation", file=sys.stderr)
+            return 2
+        try:
+            print(json.dumps(run_invest_oos(engine, cfg), indent=2))
+        except HoldoutClosed as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 4
+        except OOSAlreadyUsed as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 3
+        return 0
+    out = run_invest(engine, cfg, presets=args.preset, noise_seeds=args.noise_seeds, write=not args.no_report)
+    for key, p in out["payloads"].items():
+        print(f"\n{p['label']}: walk-forward {p['window'][0]} → {p['window'][1]}; held-out {p['holdout'][0]} → {p['holdout'][1]} untouched")
+        print(f"{'strategy':26s} {'CAGR':>7s} {'Sharpe':>7s} {'Sortino':>8s} {'MDD':>7s} {'Calmar':>7s} {'turnover':>8s} {'CAGR gross':>10s}")
+        rows = {**{f'{c}': r for c, r in p["candidates"].items()}, **{b: r for b, r in p["baselines"].items()}}
+        for k, r in rows.items():
+            n, g = r["net"], r["gross"]
+            f = lambda v, d=2: "   n/a" if v is None else f"{v:.{d}f}"
+            print(f"{k:26s} {n['cagr'] * 100:6.1f}% {f(n['sharpe']):>7s} {f(n.get('sortino')):>8s} {n['max_drawdown'] * 100:6.1f}% {f(n.get('calmar')):>7s} {n.get('turnover_annual') or 0:8.1f} {g['cagr'] * 100:9.1f}%")
+        rc = p["bootstrap"]["reality_check"]
+        b = p["best"]
+        ci = p["bootstrap"]["vs_equal_weight"][b]["sharpe_diff"]
+        print(f"best: {b}; Sharpe difference vs equal-weight {ci['point']:+.2f} [{ci['lo']:+.2f}, {ci['hi']:+.2f}]; reality-check p = {rc['p_value']:.3f}")
+        d = p["decision"]
+        print("decision:", "PASS - the held-out period may be opened" if d["passed"] else "FAIL - does not beat the baselines after costs; held-out period stays closed")
+        for c in d["criteria"]:
+            print(f"  [{'x' if c['ok'] else ' '}] {c['name']}: {c['value']} vs {c['threshold']} {c['detail']}")
     return 0
 
 

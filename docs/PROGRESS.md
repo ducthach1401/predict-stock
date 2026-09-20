@@ -322,7 +322,7 @@ Pre-registered decision: **1 of 5 criteria fails** — net Sharpe 1.07 is below 
 What the numbers say (and do not):
 * **There is a real ranking signal**: mean daily rank IC 0.055 (t 4.4 with the overlap adjustment; positive in 9 of 11 windows) against 0.015 for 10-day momentum and about 0 for mean reversion.
 * **The signal does not survive costs well enough**: the weekly top-10 earns 65% a year before costs and 32% after (turnover 32×/year). Equal-weight earns the same CAGR with lower volatility, hence the higher Sharpe. It beats equal-weight in 4 of 11 windows. Costs are the whole story: with zero slippage the same portfolio has Sharpe 1.38, with zero fee and tax 1.52, with the configured costs 1.07 — but those are not achievable, and this was not used to choose anything.
-* **The probabilities are not usable.** Out of sample the "target before stop" probability has no measurable skill: mean per-fold AUC 0.51 (0.44–0.56), Brier 0.224 (raw) / 0.226 (isotonic) against 0.223 for the training base rate. Calibration did not help (ECE raw 0.069, isotonic 0.072, Platt 0.069): the event rate moves between windows (22%–44%) far more than the model can follow. Filtering entries by probability made the weekly portfolio *far worse* (net Sharpe 0.05 at ≥ 1.0× the calibration-window base rate, -0.45 at 1.25×, and at 1.5× no name passes so there are no trades) — the probability is not a useful entry filter.
+* **The probabilities are not usable.** Out of sample the "target before stop" probability has no measurable skill: mean per-fold AUC 0.51 (0.44–0.55), Brier 0.224 (raw) / 0.226 (isotonic) against 0.223 for the training base rate. Calibration did not help (ECE raw 0.070, isotonic 0.073, Platt 0.070): the event rate moves between windows (22%–44%) far more than the model can follow. Filtering entries by probability made the weekly portfolio *far worse* (net Sharpe 0.05 at ≥ 1.0× the calibration-window base rate, -0.45 at 1.25×, and at 1.5× no name passes so there are no trades) — the probability is not a useful entry filter.
 * **Return quantiles are reasonable in width** (q10/q50/q90 covered 10.7% / 48.8% / 88.6%; the q10–q90 interval 77.9% against 80% nominal; tail pinball loss slightly better than a constant, median slightly worse). **Expected holding time has no skill**: mean absolute error 2.70 sessions against 2.67 for always guessing the overall median.
 * Barrier trades lose money after costs whatever the ATR pair or probability threshold that was tried (net Sharpe -0.58 … 0.46 across the ATR pairs and probability thresholds tried, none positive at 2× costs): gross Sharpe is 1.2–1.6 but turnover is 26–44×/year.
 * K (5 / 10 / 20 → net Sharpe 1.03 / 1.07 / 0.93) is not what matters.
@@ -338,6 +338,7 @@ Deep learning was **not** attempted: the boosted trees do not beat the baselines
 3. The report first said "3 rows purged" per fold; the purge removes **nothing** (embargo = barrier horizon). The 3 rows are unlabelled instrument-days of a suspended stock (Oct 2020). Accounting is now separate (`purged` vs `unlabelled`).
 4. My first top-K helper renormalised weights when a probability filter left fewer than K names (each got 1/n instead of 1/K, so "cash" never appeared). Found by a unit test; weights are now 1/K.
 5. Two chart/report slips (categorical x ticks, a stale "five test windows" sentence) fixed.
+6. **A small leak into the reported figures, found during Phase 6** (fixed): the IC, quantile, calibration and holding-time figures used the 5 / 10-session forward labels of the last development days, whose windows end after 2025-09-19 — up to 10 sessions of *held-out* prices entered those figures through the labels. The portfolio backtests stop before the held-out period and were never affected; the models were not affected (training labels are purged); the verdict does not use those figures. Those figures now use only rows whose label ends before the held-out period (IC 0.0552 → 0.0554, ECE raw 0.0694 → 0.0701; recorded as amendment 3 in `experiments`). The held-out period is therefore untouched in the sense that no strategy or model was ever evaluated on it, and — after this fix — no figure depends on its prices.
 
 ### Limits and assumptions
 * Everything under Phase 4's limits applies (universe look-ahead/survivorship, adjusted prices, inferred price band, T+2 all period, brief-default costs not re-verified, no market impact); LARGE50 hindsight inflates every strategy here, the baselines included.
@@ -352,4 +353,85 @@ make swing                                   # about 5 minutes; idempotent: unch
 python -m predict_stock swing run --trials 25 --noise-seeds 20
 python -m predict_stock swing report         # rewrite docs/SWING.md from the latest stored run
 python -m predict_stock swing oos --final    # only after a PASS; refused otherwise
+```
+
+## Phase 6 — INVEST strategy (B1 1-3 months, B2 6-12+ months)  ·  implemented and evaluated (2026-09-20), uncommitted · **verdict: neither preset beats the baselines after costs**
+
+### Pre-registration (written BEFORE any INVEST model was trained)
+
+The same content is stored in `experiments` (`invest:preregistration`, timestamped) by `invest run` before anything is fitted.
+
+* **Presets.** B1: label horizon 63 sessions, monthly rebalance. B2: horizon 126 sessions, quarterly rebalance. Embargo between training and test = the preset's horizon; every training/validation sample is purged by the end date of its label (labels overlap heavily). Folds: expanding, ≥ 500 training sessions, test windows of 125 sessions, validation = last 125 sessions of the training window. Nothing at or after 2025-09-19 is used.
+* **Candidates (small sample ⇒ simple models, strong regularisation; no deep learning).**
+  1. `factor` — rule-based composite, **no fitted parameter**: mean of the cross-sectional ranks of 6-month momentum, 12-month momentum (both skipping the last month), *low* 126-session volatility, price above its 200-day average, shallow 252-session drawdown. This is the pre-declared primary reference.
+  2. `ridge`, 3. `elasticnet` — on the 16 `invest:2` features (median-imputed, standardised per fold), target = cross-sectional rank of the forward return at the horizon. One hyper-parameter grid on the first fold's training/validation rows, then frozen; every grid point is an `experiments` row.
+  4. `lgbm` — LightGBM, 4 leaves, depth 2, ≥ 400 rows per leaf, L2 50, fixed (not tuned).
+  The q10/q50/q90 "bear/base/bull" quantiles of the forward return at the horizon come from three quantile LightGBM boosters of the same shallow shape (one set per fold, shared by all candidates).
+* **Primary portfolio.** Top 10 by score, equal weight, cap 15%, scheduled rebalance with the engine's minimum-deviation band, each rebalance carried out in **2 tranches** (5 / 10 sessions apart), orders at the next open through the Phase 4 engine. No regime filter, no DCA in the primary.
+* **Reported variants (information only, never used to choose anything):** K = 8 / 10 / 15; weighting inverse-vol / risk parity / min-variance (Ledoit-Wolf) / HRP; 1 or 3 tranches; regime filter (VN30 — VNINDEX before VN30 has a 200-day average — below its SMA200 ⇒ keep 50% of the stock weights, the rest in cash); DCA of 10 M VND a month.
+* **Decision rule.** For each preset, the candidate with the best net Sharpe over the walk-forward window is judged. The held-out period is opened (once, all baselines together) only if a preset meets ALL of: (1) net Sharpe above every portfolio baseline over the same window (equal-weight, both 6-12-month momentum variants, 10-day momentum, mean reversion); (2) **White's reality check over the four candidates** (stationary block bootstrap, mean block 21 sessions, 2000 resamples): p ≤ 0.10 that the best Sharpe difference against equal-weight is luck; (3) mean daily rank IC > 0 with an overlap-adjusted t-statistic ≥ 2 (effective sample = days / horizon); (4) the net return beats equal-weight in ≥ 60% of rolling 1-year windows; (5) net Sharpe still > 0 at 2× costs. Otherwise: "does not beat the baselines after costs", held-out untouched, no further tuning.
+* **Thesis-break conditions** (an output, not a trading rule here): close below the 200-day average; relative strength (rank of 6-month momentum in the universe) below 0.40; drawdown from the 252-session high beyond 15% (B1) / 25% (B2). Their information content is reported, not tuned.
+* **Fundamentals.** None exist in the data; everything runs on prices. If columns starting with `fund_` ever appear in the dataset, an ablation (with vs without them) is reported separately.
+
+### What was built
+
+| piece | where |
+|---|---|
+| candidates: rule-based factor score (nothing fitted), Ridge, ElasticNet, shallow LightGBM; q10/q50/q90 scenario boosters; JSON artifacts, byte-stable | `src/predict_stock/invest/models.py` |
+| walk-forward (embargo = the preset's horizon, purge by that label's end), one grid on the first fold, labels ending inside the held-out period excluded from every figure | `invest/walkforward.py` |
+| weights: equal / inverse-vol / risk parity / min-variance (Ledoit-Wolf) / HRP with a cap; tranches; regime filter; quarterly schedule | `invest/weights.py`, `invest/strategy.py`, `backtest/baselines.py` |
+| stationary block bootstrap, White's reality check, rolling windows, DCA, thesis-break flags | `invest/stats.py` |
+| decision rule, per-signal details, fundamentals ablation, held-out guard | `invest/evaluate.py`, `invest/job.py` |
+| reports (one per preset) + charts | `docs/INVEST_B1.md`, `docs/INVEST_B2.md`, `docs/img/invest_b*_*.png` |
+| DB | 72 `models` (2 presets × 4 candidates × (8 folds + final)), 13,148 `predictions` (rebalance dates only, with scenario quantiles / horizon / thesis flags / contributions in `details`), 34 hyper-parameter grid rows + 2 study rows, pre-registration, 2 walk-forward + 8 strategy `experiments`, 128 `model_metrics` |
+
+### Result (walk-forward, net of costs, baselines re-run over the same window; 90% block-bootstrap intervals)
+
+| | B1: 2021-05 → 2025-05 (horizon 63, monthly) | B2: 2021-08 → 2025-08 (horizon 126, quarterly) |
+|---|---|---|
+| Factor score | 5.0% · Sharpe 0.32 | 3.2% · 0.25 |
+| Ridge / ElasticNet | 1.8% · 0.20 / 1.5% · 0.19 | 9.5% · 0.47 / 8.0% · 0.42 |
+| Shallow LightGBM | -0.4% · 0.11 | 10.8% · 0.51 |
+| **Equal-weight universe** | **9.2% · 0.49** | **13.3% · 0.66** |
+| Momentum 6-12 m / VN30 buy & hold | 6.0% · 0.35 / 0.0% · 0.10 | 10.3% · 0.50 / 4.1% · 0.30 |
+| Best candidate's Sharpe − equal-weight | factor: -0.17 [-0.63, +0.29] | LightGBM: -0.15 [-0.52, +0.20] |
+| White's reality check p (4 candidates) | 0.963 | 0.967 |
+| Best candidate's rank IC (t) | factor -0.019 (-0.25); ridge 0.062 (1.23) | LightGBM 0.013 (0.15); ridge 0.084 (1.11) |
+| Rolling 1-year windows ahead of equal-weight | 32% | 36% |
+
+Pre-registered decision: **B1 fails 4 of 5 criteria, B2 fails 4 of 5** (both pass only "still positive at 2× costs"). The held-out period was **not opened**; nothing was tuned afterwards.
+
+What the numbers say (and do not):
+* **No candidate is distinguishable from equal-weight, and none is better in point estimate.** Every Sharpe interval spans roughly -0.4 … +1.4 (about ±0.9 around the estimate) — four years, one path, overlapping 63/126-session labels. The reality check, which corrects for having looked at four candidates, says the best difference against equal-weight is what luck would produce at least 96% of the time.
+* **The simple rule-based score is not worse than the learned models in B1 and is the worst in B2** — but IC by fold swings between about -0.4 and +0.3 for it (momentum regimes), so this is noise too. The only positive-IC learned models (ridge / elastic net, IC 0.06-0.09, t ≈ 1.1-1.2) do not convert it into a better portfolio after costs.
+* **Costs are not the issue here** (1-4 points a year of cost drag at 2-5× turnover, against 14-20 points for the 10-day strategies): the low-turnover INVEST portfolios simply do not beat holding the whole universe.
+* **The scenario quantiles (bear / base / bull) do not beat a constant** (pinball loss above the pooled out-of-sample quantile at q10, q50 and q90, both presets): they are a rough spread, not a forecast.
+* **Variants (information only, differences the size of the intervals):** the regime filter (index < SMA200 ⇒ half in cash) improved drawdown (about -49% → -38%) at equal Sharpe in B2 and lifted B1's Sharpe from 0.32 to 0.49; a single tranche did better than two in both presets (B2: Sharpe 0.64 vs 0.51 vs 0.42 for 1/2/3 tranches); HRP / inverse-vol / risk-parity weights change little, min-variance hurts in B1. None of this was used to choose anything.
+* **Thesis-break flags** carry little information in these holdings (e.g. B2: flagged names returned +7.8% over 126 sessions against +4.6% for clear ones — the wrong way round): reported, not a rule.
+* **Fundamentals**: none exist in the data; the models run on prices only. If `fund_` columns ever appear, the same job reports the with/without difference (tested on synthetic data with a planted fundamental signal).
+* **DCA** (10 M VND a month): B1 best candidate 5.3% money-weighted vs 7.3% for equal-weight; B2 16.0% vs 21.1% (approximation on the return series).
+
+### Bugs and design mistakes found while building it (kept on purpose)
+1. **Evaluation window vs the last complete test window.** With 63/126-session embargoes the last complete window ends 2025-05 (B1) / 2025-08 (B2), months before the last development session; leaving the portfolio unrebalanced after it would have distorted the tail. Every evaluation (candidates, baselines, noise, variants) now ends with the last complete test window. Found by the smoke run on real data before the real run.
+2. **Labels reaching into the held-out period** (63/126 sessions forward): excluded from every IC / quantile figure by construction here. This is what led to finding and fixing the same small leak in Phase 5 (see there).
+3. **Degenerate covariance** (windows shorter than 60 sessions, names that never traded): produced NaN weights and warnings in a test; every covariance scheme now falls back to equal weights and a test runs them with `-W error`.
+4. HRP is only *nearly* invariant to the order of the names (it bisects a dendrogram order); the test now states the true property.
+5. Chart labels of lines ending together overlapped (also in the SWING chart): spacing is now relative to the axis.
+6. **The grid found nothing**: every ridge / elastic-net grid point had a *negative* validation IC on the first fold (about -0.17 in B1, -0.28 in B2), so the "best" point is the weakest penalty at the edge of the grid — not the strong regularisation intended. Reported in both docs; the grid was pre-registered and is not widened after the fact.
+7. The shallow LightGBM often keeps ≤ 5 trees (B1: 5 of 8 folds), i.e. its scores are nearly constant there and ties are broken by instrument id. Shown per fold in the reports; the candidate that looks best by Sharpe in B2 is therefore the least trustworthy to read anything into.
+
+### Limits and assumptions
+* Phase 4's limits (LARGE50 hindsight, adjusted prices, inferred bands, T+2, brief-default costs, no market impact) apply; equal-weight LARGE50 is inflated by hindsight, which makes it a harder baseline than anything achievable in real time.
+* Four years of out-of-sample returns and overlapping labels: the number of independent observations is a handful. The bootstrap resamples days in blocks of ~21 sessions; it does not repair a sample this short.
+* The comparison window (from 2021) differs from Phase 4's (from 2019) and from SWING's; baselines were re-run per preset.
+* The candidate with the best net Sharpe is judged (a selection); the reality check accounts for it, the other criteria do not.
+* Predictions are stored for rebalance dates only (decisions are made there); per-day predictions exist only in the run's memory.
+* `invest oos --final` exists and is guarded (refuses unless a preset passed under an unchanged pre-registration; exit code 4). Under the pre-registered rule it must not be run for these models.
+
+### How to run
+```bash
+make invest                                  # about 3 minutes; idempotent (unchanged data + config: identical model files and rows)
+python -m predict_stock invest run --preset b2 --noise-seeds 20
+python -m predict_stock invest report        # rewrite the two reports from the latest stored runs
+python -m predict_stock invest oos --final   # only after a PASS; refused otherwise
 ```

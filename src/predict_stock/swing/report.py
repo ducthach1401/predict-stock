@@ -35,7 +35,7 @@ def _save(fig, path: Path) -> None:
 
 def _end_labels(ax, ends: list[tuple[float, str, object]], fs: float = 8.5) -> None:
     lo, hi = ax.get_ylim()
-    gap = ((max(v for v, _, _ in ends) - min(v for v, _, _ in ends)) or (hi - lo)) * 0.06
+    gap = (hi - lo) * 0.045                                   # one text line of the axis, so labels of lines that end together never overlap
     prev = None
     for v, k, x in sorted(ends, key=lambda t: t[0]):
         y = v if prev is None else max(v, prev + gap)
@@ -260,8 +260,8 @@ def render_markdown(p: dict, examples: list[dict] | None = None) -> str:
     L.append("Fee, tax and slippage all scaled together (0×, 0.5×, 1×, 2×, 3×) is in the results table and the chart above.\n")
 
     L.append("## Changes made after the first run had been looked at\n")
-    L.append("Both are mechanical corrections of things the first run exposed; neither touches the rank score, the primary strategy or the pre-registered decision rule. "
-             "The first run's figures are kept next to each. The primary strategy's numbers are identical in both runs.\n")
+    L.append("Mechanical corrections of things the first run exposed (and, for the third, a leak found later); none touches the rank score, the primary strategy or the pre-registered "
+             "decision rule. The earlier figures are kept next to each. The primary strategy's numbers are identical before and after.\n")
     for a in p.get("amendments", []):
         L.append(f"{a['id']}. **Found:** {a['found']}. **Change:** {a['change']}. **Affects:** {a['affects']}. **First run:** {a['first_run_result']}.")
     L.append("")

@@ -88,7 +88,7 @@ def decide(model: dict, baselines: dict[str, dict], noise: dict | None, ic: dict
          "ok": bool(best_key is not None and sharpe is not None and sharpe > rivals[best_key])},
         {"name": "net Sharpe above the random-weekly 95th percentile", "value": sharpe, "threshold": p95, "detail": "20 seeds, same window and costs",
          "ok": bool(p95 is not None and sharpe is not None and sharpe > p95)},
-        {"name": f"rank IC t-statistic >= {rule.min_ic_tstat}", "value": ic.get("t_stat"), "threshold": rule.min_ic_tstat, "detail": f"mean IC {ic.get('mean')}",
+        {"name": f"rank IC t-statistic >= {rule.min_ic_tstat}", "value": ic.get("t_stat"), "threshold": rule.min_ic_tstat, "detail": "mean IC " + ("n/a" if ic.get("mean") is None else f"{ic['mean']:.4f}"),
          "ok": bool(ic.get("mean") is not None and ic["mean"] > 0 and ic.get("t_stat") is not None and ic["t_stat"] >= rule.min_ic_tstat)},
         {"name": f"share of test windows with positive net Sharpe >= {rule.min_positive_fold_share}", "value": pos_share, "threshold": rule.min_positive_fold_share,
          "detail": f"{sum(s > 0 for s in folds)} of {len(folds)} windows", "ok": bool(folds and pos_share >= rule.min_positive_fold_share)},

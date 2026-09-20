@@ -76,40 +76,51 @@ def lookup_ids(session: Session, feature_set: str, label_spec: str) -> tuple[int
     return fs, ls
 
 
-def register_model(engine: Engine, cfg: AppConfig, bundle: SwingBundle, name: str, *, dataset_id: int | None, experiment_id: int | None,
-                   extra_params: dict, artifact_dir: Path | None = None) -> tuple[int, int, str, bool]:
-    """Save the bundle under ``artifacts/models/<name>/v<version>.json.gz`` and register it (status ``candidate``).
-    Returns (model_id, version, sha256, reused). If the latest version of ``name`` has the same sha256 it is reused; otherwise version + 1."""
-    raw = bundle.to_bytes()
+def register_artifact(engine: Engine, cfg: AppConfig, raw: bytes, name: str, *, algo: str, feature_set: str, label_spec: str, dataset_id: int | None,
+                      experiment_id: int | None, params: dict, seed: int, artifact_dir: Path | None = None, suffix: str = ".json.gz") -> tuple[int, int, str, bool]:
+    """Save ``raw`` under ``<artifacts>/<name>/v<version><suffix>`` and register it in ``models`` (status ``candidate``).
+    Returns (model_id, version, sha256, reused). If the latest version of ``name`` has the same sha256 it is reused; otherwise version + 1 and the older
+    candidate versions are marked ``superseded`` (their files and predictions stay)."""
     sha = hashlib.sha256(raw).hexdigest()
-    sw = cfg.swing
     commit, _ = git_state()
-    base = artifact_dir or PROJECT_ROOT / sw.artifacts_dir
+    base = artifact_dir or PROJECT_ROOT / cfg.swing.artifacts_dir
+
+    def write(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists() or path.read_bytes() != raw:
+            path.write_bytes(raw)
     with session_scope(engine) as s:
-        fs_id, ls_id = lookup_ids(s, sw.feature_set, sw.label_spec)
+        fs_id, ls_id = lookup_ids(s, feature_set, label_spec)
         latest = s.scalars(select(Model).where(Model.name == name).order_by(Model.version.desc())).first()
         if latest is not None and latest.artifact_sha256 == sha:
-            path = base / name / f"v{latest.version}.json.gz"
+            path = base / name / f"v{latest.version}{suffix}"
             if not path.exists():
-                bundle.save(path)
+                write(path)
             return latest.id, latest.version, sha, True
         version = (latest.version + 1) if latest is not None else 1
         for old in s.scalars(select(Model).where(Model.name == name, Model.status == "candidate")):
-            old.status = "superseded"                                        # the earlier versions stay (files, predictions) but are no longer the candidate
-        path = base / name / f"v{version}.json.gz"
-        bundle.save(path)
+            old.status = "superseded"
+        path = base / name / f"v{version}{suffix}"
+        write(path)
         try:
             shown = str(path.relative_to(PROJECT_ROOT))
         except ValueError:
             shown = str(path)
-        row = Model(name=name, version=version, algo=ALGO, feature_set_id=fs_id, label_spec_id=ls_id, dataset_id=dataset_id, experiment_id=experiment_id,
-                    artifact_path=shown, artifact_sha256=sha, seed=sw.seed, git_commit=commit, status="candidate",
-                    params={"tree_params": bundle.tree_params, "n_estimators": sw.n_estimators, "early_stopping_rounds": sw.early_stopping_rounds,
-                            "best_iteration": bundle.best_iteration, "calibration": bundle.calibration_used, "horizon": sw.horizon,
-                            "quantiles": sw.quantiles, "features": bundle.features, "meta": bundle.meta, **extra_params})
+        row = Model(name=name, version=version, algo=algo, feature_set_id=fs_id, label_spec_id=ls_id, dataset_id=dataset_id, experiment_id=experiment_id,
+                    artifact_path=shown, artifact_sha256=sha, seed=seed, git_commit=commit, status="candidate", params=params)
         s.add(row)
         s.flush()
         return row.id, version, sha, False
+
+
+def register_model(engine: Engine, cfg: AppConfig, bundle: SwingBundle, name: str, *, dataset_id: int | None, experiment_id: int | None,
+                   extra_params: dict, artifact_dir: Path | None = None) -> tuple[int, int, str, bool]:
+    """A SWING bundle as a model row (see ``register_artifact``)."""
+    sw = cfg.swing
+    params = {"tree_params": bundle.tree_params, "n_estimators": sw.n_estimators, "early_stopping_rounds": sw.early_stopping_rounds, "best_iteration": bundle.best_iteration,
+              "calibration": bundle.calibration_used, "horizon": sw.horizon, "quantiles": sw.quantiles, "features": bundle.features, "meta": bundle.meta, **extra_params}
+    return register_artifact(engine, cfg, bundle.to_bytes(), name, algo=ALGO, feature_set=sw.feature_set, label_spec=sw.label_spec, dataset_id=dataset_id,
+                             experiment_id=experiment_id, params=params, seed=sw.seed, artifact_dir=artifact_dir)
 
 
 def _rows(model_id: int, universe_id: int | None, horizon: int, frame: pd.DataFrame, run_id: int | None) -> list[dict]:
