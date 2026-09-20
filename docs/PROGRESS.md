@@ -213,3 +213,69 @@ python -m predict_stock dataset list | verify --name LARGE50__swing1__swing1
 python -m predict_stock dataset build --feature-set swing:1 --label-spec swing:1 --start 2020-01-01 --data-cutoff 2025-12-31
 ```
 
+## Phase 4 — Backtest engine & baselines  ·  acceptance met (2026-09-20), uncommitted
+
+Engine rules and how a strategy plugs in: [docs/BACKTEST.md](BACKTEST.md). Baseline results: [docs/BASELINES.md](BASELINES.md) (tables + charts).
+
+### Acceptance
+
+| Criterion | Evidence |
+|---|---|
+| Unit tests for fee, tax, lot, tick, price band, T+2, limit fill, stop-first | `tests/test_backtest_market.py` (42: tick table, rounding directions, ceiling/floor, fee/tax/slippage, lots, band inference) and `tests/test_backtest_engine.py` (39 scenarios, each hand-worked): fills at the next open, never the same session; cash flow with fee and whole lots; round trip pays fee both ways + tax on sells only + slippage; T+2 (also for full rebalances, time-stops and stops); buy at the ceiling / sell at the floor blocked; limit buy fills only if the low reaches it, at the better of limit and open, valid for N sessions; **both levels in one bar → stop first** (and `target_first` on request); gap-through exits at the open; suspension; cash limits; rebalance threshold; determinism; the future cannot change the past |
+| `make backtest` runs the baselines | `make backtest` (builds/reuses the datasets, then 9 baselines + a 20-seed noise floor): **2 min 8 s** on the real data |
+| Report saved in the DB and docs/ | 10 rows in `experiments` (`baseline:<key>` + `baseline:noise_floor`: metrics, config hash, equity-curve artifact path + sha256; re-running reuses rows), `docs/BASELINES.md`, `docs/img/baselines_equity.png`, `docs/img/baselines_cost_sensitivity.png`, equity CSVs under `artifacts/backtests/` |
+
+Suite: **460 tests** pass (+ 4 live), of which 126 are new in this phase.
+
+### What was built
+
+1. **Engine** — event-driven daily simulator, long-only: signal at close t, fill at the open of t+1; limit orders with fill-rate records; stop / target / time-stop from each session's high/low, **stop first** when both fall in one bar, gap-through at the open; T+2; lots of 100; tick size by price; price band (known exchange, else inferred PIT); fee + tax on sells + slippage; suspension and locked limits; every blocked attempt is counted by reason.
+2. **Portfolio** — top-K, equal / inverse-volatility weights, cap per instrument (excess redistributed or left in cash), rebalance threshold (relative to the target position).
+3. **Walk-forward** — expanding/rolling folds, embargo gap, purging by label end date (`purge_train`), held-out final period excluded from every fold and every development run.
+4. **Baselines** — equal-weight universe, short-term momentum, short-term mean reversion, momentum 6-12 months (+ inverse-vol variant), buy & hold VNINDEX and VN30, and a **random top-K noise floor over 20 seeds** (weekly and monthly). No baseline parameter was tuned (K = 10 and the schedules are conventions).
+5. **Metrics** — CAGR, Sharpe, Sortino, MDD, Calmar, turnover, win rate, profit factor, expectancy, exposure; before/after costs (a second run with all costs at 0), sensitivity to costs ×0 / 0.5 / 1 / 2 / 3, up / sideways / down periods (ex-post, VNINDEX) and calendar years, walk-forward folds, VN30-era like-for-like table; equity + drawdown and cost-sensitivity charts (dataviz palette, validated: worst adjacent CVD ΔE 9.1; 3 of 4 hues are < 3:1 on the surface, so direct labels and the tables carry the values).
+
+### Development-period results (2019-03-01 → 2025-09-18, net of costs, LARGE50)
+
+| strategy | CAGR | Sharpe | MDD | turnover/yr | CAGR before costs |
+|---|---|---|---|---|---|
+| Equal-weight universe | 22.2% | 1.01 | -48% | 0.2 | 22.3% |
+| Momentum 6-12 months | 22.5% | 0.91 | -58% | 3.0 | 25.5% |
+| Momentum 6-12 months, inverse-vol | 21.2% | 0.90 | -57% | 3.2 | 24.2% |
+| Buy & hold VN30 (from 2020-05-11) | 17.6% | 0.91 | -43% | 0 | 17.7% |
+| Short-term momentum (10 d, weekly) | 16.5% | 0.72 | -45% | 25.6 | **39.1%** |
+| Buy & hold VNINDEX | 8.4% | 0.52 | -40% | 0 | 8.4% |
+| Short-term mean reversion (weekly) | -16.0% | -0.61 | -78% | 28.1 | 1.9% |
+| Random top-10, monthly (median of 20 seeds) | 11.9% | 0.59 (p95 0.78) | | 9.4 | 19.5% |
+| Random top-10, weekly (median of 20 seeds) | -12.7% | -0.46 (p95 -0.34) | | 40.8 | 15.0% |
+
+What the numbers say (and do not):
+* **Nothing beats holding the whole universe equal-weight after costs** (Sharpe 1.01); the 6-12-month momentum baselines match it on return and are worse on risk. That is the bar a model has to clear, and it is inflated by the universe look-ahead (below).
+* **Costs decide the short-horizon strategies**: short-term momentum earns 39% a year before costs and 16.5% after (turnover 26×/yr, about 22 points of drag); at 3× the costs its Sharpe is negative, while 6-12-month momentum stays positive (0.77). Weekly random and weekly mean reversion lose money after costs.
+* The baselines' **absolute levels are not achievable in real time**: the universe was picked with today's information (equal-weight LARGE50 makes 22% vs 8% for the price index VNINDEX), prices are dividend-adjusted, the benchmarks are not.
+* The differences between the top rows are within noise (standard error of a Sharpe ratio over ~6.5 years ≈ 0.4); the test windows of the walk-forward folds swing from Sharpe +2.6 to -1.1 for the same strategy.
+
+### Bugs and design mistakes found while building it (kept here on purpose)
+
+1. **Rebalance threshold was absolute (fraction of equity)**: with 50 names each weight is 2%, so no top-up ever crossed a 2% band; exposure sank from 95% to 80% and equal-weight showed 18.6% instead of 22.2%. Found by checking the exposure, not the return. It is now relative to the target position (regression test).
+2. A window starting mid-history crashed on a read-only reference-price array (found by test).
+3. The first purging test expected `horizon - 1` purged samples; a label that ends **on** the first test session already used that session, so `horizon` samples go.
+4. Short-term momentum looked too good (39% gross vs an information coefficient near zero). Cross-checked with an independent vectorised open-to-open calculation, a reversed portfolio (5.8%) and random baselines: the engine agrees with the independent calculation; the cause is the data (universe chosen with hindsight) and it disappears after costs. No engine change.
+5. Chart labels of two lines finishing together overlapped; labels are now spread.
+
+### Limits and assumptions
+
+* LARGE50 look-ahead / survivorship; adjusted prices (lots, ticks, bands approximate in level); price band **inferred** (no exchange history); 59 bars whose open was unreliable cannot fill market orders that day.
+* T+2 for the whole period (earlier cycles may have been longer; not verified); sellable for the whole session two sessions after purchase; sale proceeds reusable at once; costs are the brief's defaults, not re-verified; no market-impact model (negligible at 1 bn VND, not at larger sizes).
+* The baselines trade at the next open only: limit orders, stops and targets are engine features that are tested but not exercised on real data yet.
+* Buy & hold benchmarks are price indices (no dividends) and not directly tradable; their costs are one round trip.
+* **The held-out final period (2025-09-19 → 2026-09-18) has not been touched** by any figure: `backtest oos --final` evaluates it once (recorded in `experiments`, a second call exits with code 3); it is meant to be run once for the final model and all baselines together in Phase 5.
+
+### How to run
+```bash
+make backtest                                   # datasets (reused) + baselines + report + DB, about 2 minutes
+python -m predict_stock backtest list           # the baselines
+python -m predict_stock backtest run --baseline mom_long --noise-seeds 0 --no-report
+python -m predict_stock backtest oos --final    # ONCE, at the very end; refused afterwards
+```
+

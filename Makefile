@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 ALEMBIC ?= .venv/bin/alembic
 EFFECTIVE_DATE ?= $(shell date +%F)
 
-.PHONY: setup db-up migrate universe data backfill quality features datasets test test-live
+.PHONY: setup db-up migrate universe data backfill quality features datasets backtest test test-live
 
 setup: db-up migrate universe
 
@@ -37,6 +37,11 @@ features:
 datasets: features
 	$(PY) -m predict_stock dataset build --feature-set swing:1  --label-spec swing:1
 	$(PY) -m predict_stock dataset build --feature-set invest:2 --label-spec invest:1
+
+# Phase 4: baselines on the DEVELOPMENT period (the last 12 months stay held out): before/after costs, cost sensitivity, sub-periods,
+# walk-forward folds, noise floor; writes docs/BASELINES.md + charts and stores the results in `experiments`.
+backtest: datasets
+	$(PY) -m predict_stock backtest run
 
 test:
 	$(PY) -m pytest

@@ -20,6 +20,7 @@ market:
     UPCOM: 0.15
   default_exchange: HOSE
   # HOSE tick size for stocks, prices in VND: [lower bound inclusive, tick]
+  band_inference_window: 252    # exchange history is unknown: the daily band is inferred from the trailing 252 sessions of returns
   tick_size_vnd:
     - [0, 10]
     - [10000, 50]
@@ -99,3 +100,24 @@ datasets:
   audit_lookahead: true           # every build proves features do not use data after t
   audit_cuts: 3
   require_ready: true             # instruments blocked for insufficient history at the end date are left out
+
+# ---- Backtest (Phase 4) ---------------------------------------------------------------------------
+backtest:
+  capital: 1000000000           # VND
+  start: "2019-03-01"           # INVEST features need ~274 sessions of warm-up
+  oos_months: 12                # the last 12 months are HELD OUT: not touched by any development run, revealed once
+  top_k: 10
+  max_weight: 0.15
+  rebalance_threshold: 0.20     # skip a position change smaller than 20% of the TARGET position value (a convention, not tuned)
+  tie: stop_first               # both barriers inside one bar: the stop is taken first
+  risk_free_annual: 0.0
+  cost_multipliers: [0.0, 0.5, 1.0, 2.0, 3.0]   # of fee, tax and slippage; 0 = before costs, 1 = the configured costs
+  regime_window: 126
+  regime_threshold: 0.10
+  wf_train_sessions: 500
+  wf_test_sessions: 250
+  wf_embargo_sessions: 10
+  benchmark_symbols: [VNINDEX, VN30]
+  report_path: docs/BASELINES.md
+  image_dir: docs/img
+  artifacts_dir: artifacts/backtests

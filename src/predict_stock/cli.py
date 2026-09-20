@@ -31,6 +31,7 @@ from predict_stock.db.models import Universe
 from predict_stock.db.repo import find_symbol_row
 from predict_stock.db.session import make_engine, session_scope
 from predict_stock.pipeline import run_data_pipeline, run_quality
+from predict_stock.backtest.walkforward import OOSAlreadyUsed
 from predict_stock.features import registry as freg
 from predict_stock.features.dataset import DatasetError, build_dataset, file_sha256, load_dataset
 from predict_stock.features.sets import load_definitions, sync_definitions
@@ -85,6 +86,16 @@ def build_parser() -> argparse.ArgumentParser:
     s = i.add_parser("status", help="suspension / delisting (tạm dừng / hủy niêm yết)")
     s.add_argument("--symbol", required=True); s.add_argument("--status", required=True, choices=STATUSES)
     s.add_argument("--effective-date", required=True, type=_d); s.add_argument("--note")
+
+    # ---- backtest
+    bt = sub.add_parser("backtest", help="backtest engine and baselines").add_subparsers(dest="cmd", required=True)
+    br = bt.add_parser("run", help="baselines on the development period: metrics before/after costs, sensitivity, sub-periods, report, DB")
+    br.add_argument("--baseline", action="append", help="baseline key (repeatable; default: all)")
+    br.add_argument("--noise-seeds", type=int, default=20, help="random portfolios for the noise floor (0 = skip)")
+    br.add_argument("--no-report", action="store_true", help="do not write docs/BASELINES.md and the charts")
+    bo = bt.add_parser("oos", help="evaluate the HELD-OUT final period. Allowed once; a second attempt is refused")
+    bo.add_argument("--final", action="store_true", help="required: confirms this is the single final evaluation")
+    bt.add_parser("list", help="the baselines")
 
     # ---- features / datasets
     ft = sub.add_parser("features", help="feature / label registry").add_subparsers(dest="cmd", required=True)
@@ -157,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
         return _adjustments(args, cfg, engine)
     if args.group in ("features", "dataset"):
         return _features_datasets(args, cfg, engine)
+    if args.group == "backtest":
+        return _backtest(args, cfg, engine)
     if args.group == "calendar":
         with session_scope(engine) as s:
             if args.cmd == "sync":
@@ -198,6 +211,34 @@ def main(argv: list[str] | None = None) -> int:
         for line in q["unexplained_errors"][: getattr(args, "details", 0) or 10]:
             print("  UNEXPLAINED", line)
         return 0 if res["ok"] else 1
+    return 0
+
+
+def _backtest(args, cfg: AppConfig, engine) -> int:
+    from predict_stock.backtest.baselines import BASELINES
+    from predict_stock.backtest.job import run_baselines_job, run_holdout_once
+    if args.cmd == "list":
+        for b in BASELINES.values():
+            print(f"{b.key:18s} {b.title}: {b.description}")
+        return 0
+    if args.cmd == "oos":
+        if not args.final:
+            print("error: the held-out period can be evaluated ONCE; add --final to confirm this is the final evaluation", file=sys.stderr)
+            return 2
+        try:
+            print(json.dumps(run_holdout_once(engine, cfg), indent=2))
+        except OOSAlreadyUsed as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 3
+        return 0
+    out = run_baselines_job(engine, cfg, keys=args.baseline, noise_seeds=args.noise_seeds, write=not args.no_report)
+    res = out["payload"]["results"]
+    print(f"development period {out['payload']['meta']['window'][0]} → {out['payload']['meta']['window'][1]}; held-out {out['payload']['meta']['holdout'][0]} → {out['payload']['meta']['holdout'][1]} untouched")
+    print(f"{'baseline':18s} {'CAGR net':>9s} {'Sharpe net':>10s} {'MDD':>7s} {'CAGR gross':>10s} {'Sharpe gross':>12s}")
+    for k, r in res.items():
+        n, g = r["net"], r["gross"]
+        print(f"{k:18s} {n['cagr'] * 100:8.1f}% {n['sharpe']:10.2f} {n['max_drawdown'] * 100:6.1f}% {g['cagr'] * 100:9.1f}% {g['sharpe']:12.2f}")
+    print(f"stored experiments: {out['experiments']}" + ("" if args.no_report else f"\nreport: {cfg.backtest.report_path}"))
     return 0
 
 

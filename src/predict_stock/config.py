@@ -34,6 +34,7 @@ class MarketConfig(_Strict):
         default_factory=lambda: {"HOSE": 0.07, "HNX": 0.10, "UPCOM": 0.15}
     )
     default_exchange: str = "HOSE"
+    band_inference_window: int = 252  # sessions of return history used to infer the daily price band when the exchange is unknown
     tick_size_vnd: list[tuple[float, float]] = Field(
         default_factory=lambda: [(0, 10), (10000, 50), (50000, 100)]
     )
@@ -133,6 +134,27 @@ class DatasetConfig(_Strict):
     require_ready: bool = True  # skip instruments blocked for insufficient history (ingest.min_sessions) at the end date
 
 
+class BacktestConfig(_Strict):
+    capital: float = 1_000_000_000.0  # VND
+    start: str = "2019-03-01"  # first session of the evaluation (the INVEST features need ~274 sessions of warm-up)
+    oos_months: int = 12  # the last months are held out and evaluated once
+    top_k: int = 10
+    max_weight: float | None = 0.15  # cap per instrument
+    rebalance_threshold: float = 0.20  # skip a position change smaller than this fraction of the TARGET position value
+    tie: str = "stop_first"  # both barriers in one bar
+    risk_free_annual: float = 0.0
+    cost_multipliers: list[float] = Field(default_factory=lambda: [0.0, 0.5, 1.0, 2.0, 3.0])  # of fee / tax / slippage
+    regime_window: int = 126  # sessions per market-condition window
+    regime_threshold: float = 0.10  # benchmark move separating up / sideways / down
+    wf_train_sessions: int = 500
+    wf_test_sessions: int = 250
+    wf_embargo_sessions: int = 10
+    benchmark_symbols: list[str] = Field(default_factory=lambda: ["VNINDEX", "VN30"])
+    report_path: str = "docs/BASELINES.md"
+    image_dir: str = "docs/img"
+    artifacts_dir: str = "artifacts/backtests"
+
+
 class AppConfig(_Strict):
     seed: int = 42
     market: MarketConfig = Field(default_factory=MarketConfig)
@@ -143,6 +165,7 @@ class AppConfig(_Strict):
     adjustments: AdjustmentConfig = Field(default_factory=AdjustmentConfig)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     datasets: DatasetConfig = Field(default_factory=DatasetConfig)
+    backtest: BacktestConfig = Field(default_factory=BacktestConfig)
 
     def snapshot(self) -> dict:
         """JSON-serialisable copy for job_runs.config_snapshot (contains no secrets)."""
