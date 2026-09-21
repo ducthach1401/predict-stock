@@ -259,3 +259,41 @@ backup:
   weekly_keep: 8
   restore_database: predict_stock_restore
   compress: true
+
+# ---- Model lifecycle (Phase 9) ------------------------------------------------------------------------------
+lifecycle:
+  retrain_months: 6              # scheduled retrain: 3-12 months
+  thresholds:
+    psi_alert: 0.25
+    ks_alert: 0.20
+    baseline_quantile: 0.95
+    baseline_step: 10
+    psi_features_trigger: 3
+    monitor_window: 60
+    ic_window: 60
+    ic_min_days: 30
+    ic_z: 2.0
+    calibration_gap: 0.07
+    calibration_min_events: 200
+    fill_rate_min: 0.50
+    fill_min_orders: 30
+    hold_dev_sessions: 3.0
+    hold_min_trades: 30
+    universe_changes_trigger: 8
+  # PRE-REGISTERED promotion rule: a challenger must beat the champion on data AFTER both training cut-offs, with a bootstrap bound,
+  # not be worse on drawdown or calibration, and then be promoted by hand (`lifecycle promote --model-id X`)
+  promotion:
+    alpha: 0.10
+    bootstrap_resamples: 2000
+    bootstrap_block: 5
+    mdd_tolerance: 0.02
+    ece_tolerance: 0.02
+    min_days: {swing: 40, invest_b1: 60, invest_b2: 60}
+    shadow_min_weeks: {swing: 8, invest_b1: 21, invest_b2: 33}
+    compare_horizon: {swing: 5, invest_b1: 63, invest_b2: 126}
+  meta_min_trades: 300
+  meta_train_fraction: 0.70
+  recalibration_min_events: 300
+  reference_quantiles: 101
+  protected_period: ["2025-09-19", "2026-09-18"]   # the held-out year of the research: never used to compare or monitor models
+  auto_retrain: false

@@ -6,7 +6,7 @@ no code in this project places a real order, holds a broker credential or calls 
 
 ## The daily job (`python -m predict_stock paper run`, cron 16:30 Asia/Ho_Chi_Minh, Mon-Fri)
 
-Every step is its own row in `job_runs` (`paper_universe`, `paper_ingest`, `paper_calendar`, `paper_features`, `paper_flags`, `paper_cards`, `paper_state`, `paper_report`) with
+Every step is its own row in `job_runs` (`paper_universe`, `paper_ingest`, `paper_calendar`, `paper_features`, `paper_flags`, `paper_cards`, `paper_state`, `paper_shadow`, `paper_monitor`, `paper_lifecycle`, `paper_report`) with
 status and duration; a failing step writes an alert (`job_failed`) and the day goes on with what can still be done. Every step is idempotent: run the day again and nothing changes.
 
 | step | what it does |
@@ -19,6 +19,9 @@ status and duration; a failing step writes an alert (`job_failed`) and the day g
 | flags | open recommendations of a stock that left the universe get the flag `ra khỏi rổ` (`recommendations.flags`) and a `left_universe` alert |
 | cards | the final models score the members; SWING cards every day, INVEST cards **only on rebalance dates** (first session of the month for B1, of the quarter for B2) and on their tranche dates (rebalance + 5 / 10 sessions). Stored in `recommendations` (BUY / WATCH; a stored card is never rewritten), predictions of the final SWING model in `predictions` |
 | state | the paper portfolio is **replayed** from the stored cards and the INVEST target book (`sleeve_targets`) by the same engine as the backtest, over the real prices, from the start of the paper record to the session; the result is written to `paper_orders`, `paper_positions` (one book per sleeve: `paper:swing`, `paper:invest_b1`, `paper:invest_b2`), `portfolio_snapshots`, `recommendation_outcomes` and the `status` of every recommendation |
+| shadow | the champions and every shadow challenger score the universe; the predictions are stored, nothing else (no card, no order): [model_lifecycle.md](model_lifecycle.md) |
+| monitor | feature drift (PSI / KS), rolling IC, calibration, fill rate, holding-time deviation of the champions into `monitoring_metrics`; breaches are alerts (`monitor_drift`, `monitor_ic`, `monitor_calibration`, `monitor_fill`, `monitor_hold`, `monitor_universe`) |
+| lifecycle | first session of the month only (`paper_lifecycle`): which retrains are due (`retrain_due` alert), the comparison of every shadow challenger (`challenger_ready` when one meets the promotion rule; promotion stays a manual command), what the closed recommendations say |
 | report | `reports/paper/<date>/report.md`, `report.html` and CSV files; optional Telegram / e-mail |
 
 Recommendation status: `pending` (waiting to fill) → `holding` → `target` / `stopped` / `time_exit` / `kill_switch` / `closed` (a rebalance sale); never filled: `expired` (validity ran out),

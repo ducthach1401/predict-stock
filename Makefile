@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 ALEMBIC ?= .venv/bin/alembic
 EFFECTIVE_DATE ?= $(shell date +%F)
 
-.PHONY: setup db-up migrate universe data backfill quality features datasets backtest swing invest reco paper backup restore-test crontab test test-live
+.PHONY: setup db-up migrate universe data backfill quality features datasets backtest swing invest reco paper backup restore-test crontab lifecycle-status lifecycle-monitor lifecycle-due lifecycle-evaluate test test-live
 
 setup: db-up migrate universe
 
@@ -70,6 +70,20 @@ restore-test:
 
 crontab:
 	$(PY) -m predict_stock paper crontab
+
+# Phase 9: model lifecycle (status, monitoring, which retrains are due, the monthly evaluation). Retrain / promote / rollback take arguments:
+#   python -m predict_stock retrain --strategy swing --trigger manual        python -m predict_stock promote --model-id N        python -m predict_stock rollback --strategy swing --reason "..."
+lifecycle-status:
+	$(PY) -m predict_stock lifecycle status
+
+lifecycle-monitor:
+	$(PY) -m predict_stock lifecycle monitor
+
+lifecycle-due:
+	$(PY) -m predict_stock lifecycle due
+
+lifecycle-evaluate:
+	$(PY) -m predict_stock lifecycle evaluate
 
 test:
 	$(PY) -m pytest

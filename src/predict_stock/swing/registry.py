@@ -13,7 +13,7 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.orm import Session
 
 from predict_stock.config import PROJECT_ROOT, AppConfig
-from predict_stock.db.models import Experiment, FeatureSet, LabelSpec, Model, Prediction
+from predict_stock.db.models import Experiment, FeatureSet, LabelSpec, Model, ModelStatusLog, Prediction
 from predict_stock.db.session import session_scope
 from predict_stock.runs import git_state, save_config_snapshot
 from predict_stock.swing.model import SwingBundle
@@ -77,10 +77,11 @@ def lookup_ids(session: Session, feature_set: str, label_spec: str) -> tuple[int
 
 
 def register_artifact(engine: Engine, cfg: AppConfig, raw: bytes, name: str, *, algo: str, feature_set: str, label_spec: str, dataset_id: int | None,
-                      experiment_id: int | None, params: dict, seed: int, artifact_dir: Path | None = None, suffix: str = ".json.gz") -> tuple[int, int, str, bool]:
+                      experiment_id: int | None, params: dict, seed: int, artifact_dir: Path | None = None, suffix: str = ".json.gz", strategy: str | None = None,
+                      trained_until=None) -> tuple[int, int, str, bool]:
     """Save ``raw`` under ``<artifacts>/<name>/v<version><suffix>`` and register it in ``models`` (status ``candidate``).
     Returns (model_id, version, sha256, reused). If the latest version of ``name`` has the same sha256 it is reused; otherwise version + 1 and the older
-    candidate versions are marked ``superseded`` (their files and predictions stay)."""
+    *candidate* versions are retired (files and predictions stay; a shadow or champion version is never touched here)."""
     sha = hashlib.sha256(raw).hexdigest()
     commit, _ = git_state()
     base = artifact_dir or PROJECT_ROOT / cfg.swing.artifacts_dir
@@ -99,7 +100,8 @@ def register_artifact(engine: Engine, cfg: AppConfig, raw: bytes, name: str, *, 
             return latest.id, latest.version, sha, True
         version = (latest.version + 1) if latest is not None else 1
         for old in s.scalars(select(Model).where(Model.name == name, Model.status == "candidate")):
-            old.status = "superseded"
+            old.status = "retired"
+            s.add(ModelStatusLog(model_id=old.id, from_status="candidate", to_status="retired", actor="registry", reason=f"a newer version of {name} was registered"))
         path = base / name / f"v{version}{suffix}"
         write(path)
         try:
@@ -107,9 +109,11 @@ def register_artifact(engine: Engine, cfg: AppConfig, raw: bytes, name: str, *, 
         except ValueError:
             shown = str(path)
         row = Model(name=name, version=version, algo=algo, feature_set_id=fs_id, label_spec_id=ls_id, dataset_id=dataset_id, experiment_id=experiment_id,
-                    artifact_path=shown, artifact_sha256=sha, seed=seed, git_commit=commit, status="candidate", params=params)
+                    artifact_path=shown, artifact_sha256=sha, seed=seed, git_commit=commit, status="candidate", params=params, strategy=strategy,
+                    trained_until=trained_until)
         s.add(row)
         s.flush()
+        s.add(ModelStatusLog(model_id=row.id, from_status=None, to_status="candidate", actor="registry", reason="registered"))
         return row.id, version, sha, False
 
 
@@ -119,8 +123,10 @@ def register_model(engine: Engine, cfg: AppConfig, bundle: SwingBundle, name: st
     sw = cfg.swing
     params = {"tree_params": bundle.tree_params, "n_estimators": sw.n_estimators, "early_stopping_rounds": sw.early_stopping_rounds, "best_iteration": bundle.best_iteration,
               "calibration": bundle.calibration_used, "horizon": sw.horizon, "quantiles": sw.quantiles, "features": bundle.features, "meta": bundle.meta, **extra_params}
+    tu = (extra_params.get("fold") or {}).get("train") or [None, None]
     return register_artifact(engine, cfg, bundle.to_bytes(), name, algo=ALGO, feature_set=sw.feature_set, label_spec=sw.label_spec, dataset_id=dataset_id,
-                             experiment_id=experiment_id, params=params, seed=sw.seed, artifact_dir=artifact_dir)
+                             experiment_id=experiment_id, params=params, seed=sw.seed, artifact_dir=artifact_dir, strategy="swing",
+                             trained_until=None if not tu[1] else __import__("datetime").date.fromisoformat(str(tu[1])[:10]))
 
 
 def _rows(model_id: int, universe_id: int | None, horizon: int, frame: pd.DataFrame, run_id: int | None) -> list[dict]:

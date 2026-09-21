@@ -550,3 +550,45 @@ Runbook: [OPERATIONS.md](OPERATIONS.md).
 * Telegram / e-mail senders are implemented and tested with stubs only (no network in tests); they were not exercised against real services.
 * The restore test needs the admin credential (`MYSQL_ROOT_PASSWORD`) to create the scratch database.
 * Backups are on the same machine (`backups/`): copying them elsewhere is up to you.
+
+
+## Phase 9 — Model lifecycle: monitoring, retraining, champion / challenger  ·  implemented and accepted (2026-09-21), uncommitted
+
+Full description, criteria and how-tos: [model_lifecycle.md](model_lifecycle.md).
+
+### What was built
+
+| piece | where |
+|---|---|
+| **Registry** with status `candidate → shadow → champion → retired` per strategy, one champion each, every change in `model_status_log` (actor, reason); `rollback` to the previous champion; migration `0007` (existing final models became the champions, superseded versions `retired`) | `lifecycle/registry.py`, `alembic/versions/0007_*` |
+| **Provenance** frozen into `recommendations.provenance` when a card is stored; `lifecycle trace` verifies every link (model file sha256, dataset file sha256, git commits exist, price data as known on the day) | `lifecycle/provenance.py` |
+| **Monitoring**: PSI / KS per feature against a stored training reference, rolling IC, hit rate, calibration, fill rate, holding-time deviation, universe turnover → `monitoring_metrics`, alerts; part of `paper run` (`shadow`, `monitor` steps) | `lifecycle/monitor.py`, `reference.py` |
+| **Retrain** (`retrain --strategy swing|invest|invest_b1|invest_b2 --trigger schedule|drift|manual`) with the current walk-forward protocol; `lifecycle due` lists the triggers (schedule 3–12 months, drift, IC decay, calibration, universe changes, new feature set) | `lifecycle/retrain.py` |
+| **Shadow**: predictions only | `lifecycle/shadow.py` |
+| **Compare / promote / rollback / reject** with a pre-registered rule (bootstrap on rank IC or net Sharpe after both training dates, MDD and calibration not worse, attempt-adjusted level `alpha / k`, manual `promote`) | `lifecycle/compare.py`, `config/default.yaml → lifecycle.promotion` |
+| **Outcomes**: `assess`, `recalibrate` (proposal), `meta-label` (secondary filter trial, each try an experiment) | `lifecycle/outcomes.py` |
+| **Monthly evaluation** inside the daily job | `lifecycle/job.py`, `paper/daily.py` |
+| CLI: `lifecycle status / history / trace / monitor / due / shadow / compare / evaluate / assess / recalibrate / meta-label / backfill-reference`, top-level `retrain`, `promote`, `reject`, `rollback`; `make lifecycle-*` | `cli.py`, `Makefile` |
+
+### Acceptance
+
+* **Promote / rollback tests** (`tests/test_lifecycle.py`): one champion per strategy, promotion retires the old champion in the same transaction, every change logged; illegal moves refused; a candidate skips the shadow stage only to become the first champion; `rollback` restores the previous champion and retires the current one; `promote` re-runs the comparison and refuses when it fails.
+* **A challenger running shadow and being rejected**: on a simulated market (12 stocks, 330 sessions, 196 realised days of stored predictions for both models, 40 weeks of shadow) the challenger has rank IC 0.019 against the champion's 0.765 (bootstrap lower bound of the difference −0.77), net Sharpe −0.01 against 9.17, max drawdown −5.7% against −1.3% → `REJECTED`, `experiments` row with status `rejected`, `promote` refused with the reason; the champion is unchanged. A second case that matters more: a challenger with the **same skill and a different random draw** has a nonzero IC difference but a bootstrap lower bound below 0 → not promoted (the "better by one lucky trial" case). The simulated skilled model is built from future returns: this shows the mechanics and the guards, not any real gain. In `tests/test_lifecycle_e2e.py` (the paper e2e market) a real LightGBM challenger of another seed shadows through three daily runs: it scored the universe every day like the champion, **no recommendation came from it**, and after three days `compare` says `NOT ENOUGH SHADOW DATA` and `promote` is refused.
+* **A drift trigger producing an alert**: three of four features shifted by 3 standard deviations in the last 60 sessions → `monitor_drift` alert (severity error, PSI max 6.4, KS max 0.87, features f1–f3 named), metrics stored in `monitoring_metrics`, and `lifecycle due` lists a `drift` reason; the undisturbed control raises nothing.
+* **Every recommendation fully traceable**: in the e2e run each BUY card has a provenance record (model id / name / version / sha256 / seed / git commit / training cut-off, scoring dataset sha256, feature set, label spec, job run and code commit, price fingerprint) and `trace` verifies it (`verified: true`, data fingerprint matches, model file sha256 matches); overwriting one byte of the model file turns `verified` to `false`. On the real database `lifecycle trace --recommendation-id 74` rebuilds the chain of an older card (model #24 → `swing_lgbm_final` v2, sha256 ok, training dataset file sha256 ok, git commit exists) and says it has no data fingerprint.
+* **Real system**: `paper run --as-of 2026-09-18` with the new steps: all 11 steps ok in 50 s; `lifecycle:evaluate:2026-09` written; three `retrain_due` alerts (all three champions are past the 6-month schedule: training data ends 2025-09-04 / 2025-06-19 / 2025-03-18); 118 monitoring metrics stored; **no drift** on any strategy. `retrain --strategy swing --trigger manual` is **refused** (would consume the held-out year) and nothing was trained.
+* 761 tests pass (+30); `alembic check` clean on both databases.
+
+### Bugs and design mistakes found while building it (kept on purpose)
+1. **The fixed drift threshold (PSI 0.25) was useless.** On the real data it flagged 8 of 15 INVEST features in nearly every 60-session window — the 50 stocks share one market state, so a window holds far fewer independent observations than rows and level features move as a block. An alert that always fires carries no information. Replaced by a per-feature yardstick from the training period's own 60-session slices (95th percentile); the "moderate" PSI warning was removed for the same reason (`psi_warn` deleted). Out-of-sample check with a reference ending 2023-12: INVEST 0 of 31 windows with ≥ 3 features flagged, SWING 8 of 31.
+2. **Comparing or monitoring a champion on data after its training date would have evaluated the held-out year** (2025-09-19 → 2026-09-18) that the research never opened. Performance metrics therefore use the paper record only; `compare` refuses windows touching the protected period; `retrain` refuses training data reaching into it unless `--consume-holdout`, recorded once as `holdout:consumed`.
+3. A candidate could not become champion at all (the shadow rule) — so the very first champion of a strategy has an explicit exception; found by the first test.
+4. Migration `0007` on MySQL (non-transactional DDL) left half-applied states during round-trip rehearsal on the scratch database; the downgrade no longer drops an index a foreign key needs; the real database was backed up first and upgraded once.
+5. The existing paper e2e test counted job steps (now 5 × 10 + 1: two new steps a day plus the monthly evaluation).
+
+### Limits and assumptions
+* **No challenger has been trained on the real system.** Every existing champion stops in 2025, so any retrain on the real data needs the held-out year as training data (`--consume-holdout`). That is a decision for you, not for the code: it spends the only untouched reserve of the research, in exchange for a champion trained on the last year. The paper record (from 2026-09-21) is the new untouched stretch. Until a retrain, the monitoring that works is feature drift, universe turnover, model age.
+* Rolling IC, hit rate, calibration, fill rate and holding-time deviation stay empty until there are closed paper recommendations (SWING 3–15 sessions, INVEST 63 / 126); every threshold is a default that no data has tested yet.
+* The meta-label trial on the Phase-7 backtest trades (856 SWING trades) **discarded** the filter: gain −0.18 points, bootstrap lower bound −0.47. Recalibration needs 300 closed trades and there are none yet.
+* `retrain` repeats the tuning-and-final-fit stage of the protocol (the first-fold study is reused when identical); it does not recompute the walk-forward IC table of the research.
+* Promotion compares two models on paper-record data of a few months; with 2000 bootstrap resamples and `alpha` 0.10 divided by the number of attempts, most challengers will not pass, which is the intent.

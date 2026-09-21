@@ -473,7 +473,8 @@ class Model(Base):
     """A trained model. The binary artifact is on disk: only path + sha256 are stored."""
 
     __tablename__ = "models"
-    __table_args__ = (UniqueConstraint("name", "version", name="uq_model"), TABLE_OPTS)
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_model"), Index("ix_models_strategy", "strategy", "status"),
+                      CheckConstraint("status IN ('candidate','shadow','champion','retired')", name="ck_model_status"), TABLE_OPTS)
 
     id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(64))
@@ -488,8 +489,26 @@ class Model(Base):
     params: Mapped[dict | None] = mapped_column(JSON)
     seed: Mapped[int | None] = mapped_column(Integer)
     git_commit: Mapped[str | None] = mapped_column(String(40))
-    status: Mapped[str] = mapped_column(String(16), server_default="candidate")
+    status: Mapped[str] = mapped_column(String(16), server_default="candidate")  # candidate | shadow | champion | retired
     created_at: Mapped[datetime] = _created()
+    strategy: Mapped[str | None] = mapped_column(String(16))  # swing | invest_b1 | invest_b2: the sleeve the model would serve
+    trained_until: Mapped[date | None] = mapped_column(Date)  # last session whose data the model was trained on (its labels ended before the embargo)
+
+
+class ModelStatusLog(Base):
+    """Every change of a model's status: who, when, why. The history behind promote / rollback."""
+
+    __tablename__ = "model_status_log"
+    __table_args__ = (Index("ix_model_status_log_model", "model_id", "changed_at"), TABLE_OPTS)
+
+    id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
+    model_id: Mapped[int] = mapped_column(BigPK, ForeignKey("models.id"))
+    from_status: Mapped[str | None] = mapped_column(String(16))
+    to_status: Mapped[str] = mapped_column(String(16))
+    changed_at: Mapped[datetime] = mapped_column(DateTime, server_default=UTC_NOW)
+    actor: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str | None] = mapped_column(Text)
+    details: Mapped[dict | None] = mapped_column(JSON)
 
 
 class ModelMetric(Base):
@@ -579,6 +598,7 @@ class Recommendation(Base):
     valid_until: Mapped[date | None] = mapped_column(Date)  # last session on which the order may still be placed
     card: Mapped[dict | None] = mapped_column(JSON)  # the full structured card
     card_text: Mapped[str | None] = mapped_column(Text)  # the Vietnamese text of the card
+    provenance: Mapped[dict | None] = mapped_column(JSON)  # model -> dataset -> feature set -> git commit -> the data as it was on the day (fingerprint)
     flags: Mapped[dict | None] = mapped_column(JSON)  # e.g. {"left_universe": "2026-09-21"}: the stock left the universe while the recommendation was open
 
 

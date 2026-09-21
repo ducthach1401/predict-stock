@@ -122,7 +122,7 @@ def test_shap_top_features_in_details_explain_the_direction_of_the_score(small):
     assert np.mean([np.sign(v) == np.sign(c) for _, v, c in fa if abs(v) > 0.3]) > 0.8
 
 
-def test_an_older_version_is_marked_superseded_when_a_new_version_is_registered(db, cfg, small, tmp_path):
+def test_an_older_version_is_retired_when_a_new_version_is_registered(db, cfg, small, tmp_path):
     bundle, val, scfg = small
     c = cfg.model_copy(update={"swing": scfg})
     first = register_model(db, c, bundle, "swing_lgbm_f01", dataset_id=None, experiment_id=None, extra_params={}, artifact_dir=tmp_path)
@@ -130,4 +130,4 @@ def test_an_older_version_is_marked_superseded_when_a_new_version_is_registered(
     second = register_model(db, c, other, "swing_lgbm_f01", dataset_id=None, experiment_id=None, extra_params={}, artifact_dir=tmp_path)
     with db.connect() as conn:
         status = dict(conn.execute(select(Model.version, Model.status).where(Model.name == "swing_lgbm_f01")).all())
-    assert status == {1: "superseded", 2: "candidate"} and first[1] == 1 and second[1] == 2
+    assert status == {1: "retired", 2: "candidate"} and first[1] == 1 and second[1] == 2

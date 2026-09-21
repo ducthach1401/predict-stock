@@ -12,7 +12,7 @@ from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.engine import URL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -399,6 +399,59 @@ class RunConfig(_Strict):
     mode: str = "paper"  # backtest | paper. There is no live-trading mode: no code in this project places a real order.
 
 
+class LifecycleThresholds(_Strict):
+    psi_alert: float = 0.25  # floor of the PSI alert level of a feature (0.25 = the usual "significant shift"); the level is the larger of this and the training period's own slice quantile
+    ks_alert: float = 0.20  # floor of the Kolmogorov-Smirnov alert level, same rule
+    baseline_quantile: float = 0.95  # quantile of the PSI / KS of the training period's own monitor_window slices used as the feature's yardstick
+    baseline_step: int = 10  # sessions between two slices
+    psi_features_trigger: int = 3  # this many features beyond psi_alert (or ks_alert) trigger a drift retrain
+    monitor_window: int = 60  # sessions of recent data compared with the training reference
+    ic_window: int = 60  # sessions of the rolling information coefficient
+    ic_min_days: int = 30  # days with a realised label needed before the IC can raise anything
+    ic_z: float = 2.0  # alert when the rolling IC is this many standard errors below the model's own out-of-sample IC
+    calibration_gap: float = 0.07  # |mean stated probability - realised rate| beyond this (rolling)
+    calibration_min_events: int = 200
+    fill_rate_min: float = 0.50  # paper fill rate of the cards below this (the backtest of the cards had 71%)
+    fill_min_orders: int = 30
+    hold_dev_sessions: float = 3.0  # |actual - expected holding time| beyond this many sessions on average
+    hold_min_trades: int = 30
+    universe_changes_trigger: int = 8  # names added or removed in the last 90 days
+
+
+class LifecyclePromotion(_Strict):
+    """PRE-REGISTERED promotion rule (stored with every comparison). The manual `promote` command re-checks it and refuses otherwise."""
+
+    alpha: float = 0.10  # one-sided; divided by the number of challengers already tried against the same champion (multiple testing)
+    bootstrap_resamples: int = 2000
+    bootstrap_block: int = 5  # sessions
+    seed: int = 20260921
+    mdd_tolerance: float = 0.02  # the challenger's max drawdown may not be worse than the champion's by more than this
+    ece_tolerance: float = 0.02  # nor its calibration error (SWING probability)
+    min_days: dict[str, int] = Field(default_factory=lambda: {"swing": 40, "invest_b1": 60, "invest_b2": 60})  # sessions with a realised label after both training cut-offs
+    shadow_min_weeks: dict[str, int] = Field(default_factory=lambda: {"swing": 8, "invest_b1": 21, "invest_b2": 33})  # at least the label horizon plus 8 weeks
+    compare_horizon: dict[str, int] = Field(default_factory=lambda: {"swing": 5, "invest_b1": 63, "invest_b2": 126})  # forward-return horizon of the rank IC
+
+
+class LifecycleConfig(_Strict):
+    retrain_months: int = 6  # scheduled retrain interval (3-12)
+    thresholds: LifecycleThresholds = Field(default_factory=LifecycleThresholds)
+    promotion: LifecyclePromotion = Field(default_factory=LifecyclePromotion)
+    meta_min_trades: int = 300  # meta-labeling is tried only with at least this many closed trades
+    meta_train_fraction: float = 0.70  # earliest share of trades for training; the rest (later in time) tests
+    recalibration_min_events: int = 300
+    reference_quantiles: int = 101  # points of the training distribution kept per feature (PSI bins, KS)
+    evaluate_day_of_month: int = 1
+    protected_period: tuple[str, str] = ("2025-09-19", "2026-09-18")  # the research's held-out year: no model is compared or monitored on it (unless `holdout:consumed` was recorded)
+    auto_retrain: bool = False  # the monthly evaluation only reports and alerts; True lets it also start an allowed retrain
+
+    @field_validator("retrain_months")
+    @classmethod
+    def _months(cls, v: int) -> int:
+        if not 3 <= v <= 12:
+            raise ValueError("retrain_months must be between 3 and 12")
+        return v
+
+
 class AppConfig(_Strict):
     seed: int = 42
     market: MarketConfig = Field(default_factory=MarketConfig)
@@ -416,6 +469,7 @@ class AppConfig(_Strict):
     paper: PaperConfig = Field(default_factory=PaperConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
     run: RunConfig = Field(default_factory=RunConfig)
+    lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
 
     def snapshot(self) -> dict:
         """JSON-serialisable copy for job_runs.config_snapshot (contains no secrets)."""

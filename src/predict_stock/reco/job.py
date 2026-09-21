@@ -124,6 +124,8 @@ def run_backtest_job(engine: Engine, cfg: AppConfig, *, write: bool = True) -> d
         out_dir = PROJECT_ROOT / rc.artifacts_dir / "runs" / payload["run_key"]
         out_dir.mkdir(parents=True, exist_ok=True)
         _save_samples(plan, out_dir)
+        from predict_stock.lifecycle.outcomes import backtest_table              # the trades with what the card said, for the lifecycle's meta-labeling trial
+        backtest_table(net.round_trips, plan.cards).to_csv(out_dir / "trades.csv", index=False)
         (out_dir / "payload.json").write_text(json.dumps(payload, indent=1, sort_keys=True, ensure_ascii=False), encoding="utf-8")
         log_experiment(engine, cfg, f"reco:backtest:{payload['run_key']}", key=payload["run_key"], params={"window": payload["window"]}, summary=payload, status="success",
                        description="Backtest of the recommendation cards exactly as issued", run_id=run_id)
@@ -307,7 +309,8 @@ def generate_live(engine: Engine, cfg: AppConfig, as_of: str | None = None, *, w
             c_e, _ = bundle.contributions(rows, "event")
             pp = pred.assign(details=build_details(pred, c_r, c_e, bundle.features, rows[bundle.features].to_numpy(float)))
             save_predictions(engine, mid, uid, sw.horizon, pp, run_id)
-            save_live_cards(engine, cfg, [c for c in cards if c.action in ("BUY", "WATCH")], pred, mid, uid, run_id, overwrite=True)
+            save_live_cards(engine, cfg, [c for c in cards if c.action in ("BUY", "WATCH")], pred, mid, uid, run_id, overwrite=True,
+                            provenance_ctx={"dataset_ids": setup.dataset_ids, "dataset_hashes": setup.dataset_hashes})
         if write_files:
             out = PROJECT_ROOT / rc.artifacts_dir / "live" / str(d.date())
             out.mkdir(parents=True, exist_ok=True)
@@ -323,7 +326,7 @@ def sw_top(rc) -> int:
 
 
 def save_live_cards(engine: Engine, cfg: AppConfig, cards: list[Card], swing_pred: pd.DataFrame | None, swing_model_id: int, uid: int | None, run_id: int | None, *,
-                    overwrite: bool = False) -> int:
+                    overwrite: bool = False, provenance_ctx: dict | None = None) -> int:
     """BUY / WATCH cards into `recommendations`, unique per (strategy, instrument, date, action). A card that is already stored is left EXACTLY as it was issued
     (the paper portfolio replays it; regenerating a day must not rewrite history) unless ``overwrite`` is set, which updates it in place (same id). Returns the
     number of rows written."""
@@ -346,6 +349,9 @@ def save_live_cards(engine: Engine, cfg: AppConfig, cards: list[Card], swing_pre
                         rationale="\n".join(["LÝ DO: "] + c.rationale["reasons"] + ["RỦI RO: "] + c.rationale["risks"] + ["MẤT HIỆU LỰC: "] + c.rationale["invalidation"]),
                         rationale_data={"contributions": c.rationale.get("facts") or [], "signal": c.signal}, confidence=c.confidence.get("p_display"), model_id=c.model_id, prediction_id=pid,
                         run_id=run_id, valid_until=pd.Timestamp(c.valid_until).date(), card=c.to_dict(), card_text=c.text_vi())
+            from predict_stock.lifecycle import provenance as PV
+            vals["provenance"] = PV.build(engine, model_id=c.model_id, instrument_id=c.instrument_id, as_of=d, run_id=run_id, strategy=c.strategy,
+                                          dataset_ids=(provenance_ctx or {}).get("dataset_ids"), dataset_hashes=(provenance_ctx or {}).get("dataset_hashes"))
             if row is None:
                 s.add(Recommendation(strategy=c.strategy, instrument_id=c.instrument_id, as_of_date=d, action=c.action, status="pending" if c.action == "BUY" else "watch", **vals))
             else:

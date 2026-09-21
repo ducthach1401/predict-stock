@@ -187,7 +187,7 @@ def step_cards(engine: Engine, cfg: AppConfig, setup: Setup, d: pd.Timestamp, ch
     from predict_stock.reco.job import save_swing_predictions
     save_swing_predictions(engine, cfg, dc, run_id)
     keep = [c for c in cards if c.action in ("BUY", "WATCH")]
-    n = save_live_cards(engine, cfg, keep, None, 0, dc.uid, run_id)
+    n = save_live_cards(engine, cfg, keep, None, 0, dc.uid, run_id, provenance_ctx={"dataset_ids": setup.dataset_ids, "dataset_hashes": setup.dataset_hashes})
     return {"cards": len(cards), "buy": sum(c.action == "BUY" for c in cards), "watch": sum(c.action == "WATCH" for c in cards), "no_trade": sum(c.action == "NO_TRADE" for c in cards),
             "new_rows": n, "invest_steps": steps, "rejected": [f"{c.card_id}: {c.rejected}" for c in cards if c.action == "NO_TRADE"][:20]}
 
@@ -256,6 +256,11 @@ def run_daily(engine: Engine, cfg: AppConfig, client: DnseClient, as_of: date | 
         else:
             run_step(engine, cfg, "cards", lambda rid: step_cards(engine, cfg, setup, dts, checks, rid), results, {"session": str(dts.date())})
         run_step(engine, cfg, "state", lambda rid: step_state(engine, cfg, setup, dts, rid), results, {"session": str(dts.date())})
+        from predict_stock.lifecycle import job as LJ
+        run_step(engine, cfg, "shadow", lambda rid: LJ.step_shadow(engine, cfg, setup, dts, rid), results, {"session": str(dts.date())})
+        run_step(engine, cfg, "monitor", lambda rid: LJ.step_monitor(engine, cfg, setup, dts, rid), results, {"session": str(dts.date())})
+        if LJ.evaluation_due(engine, cfg, dts):
+            run_step(engine, cfg, "lifecycle", lambda rid: {"evaluated": len(LJ.evaluate(engine, cfg, setup, dts, rid)["strategies"])}, results, {"session": str(dts.date())})
         if report:
             from predict_stock.paper.report import run_report
             run_step(engine, cfg, "report", lambda rid: run_report(engine, cfg, setup, dts, results), results, {"session": str(dts.date())})

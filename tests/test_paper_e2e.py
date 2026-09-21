@@ -150,7 +150,8 @@ def test_five_daily_runs_a_universe_change_and_a_repeat_without_touching_the_cod
         runs = c.execute(select(JobRun.job_name, JobRun.status, JobRun.finished_at, JobRun.started_at).where(JobRun.job_name.like("paper_%"))).all()
         snaps = c.execute(select(PortfolioSnapshot.snapshot_date, PortfolioSnapshot.equity, PortfolioSnapshot.cash).order_by(PortfolioSnapshot.snapshot_date)).all()
     assert all(r[1] == "success" and r[2] is not None and r[2] >= r[3] for r in runs)
-    assert {r[0] for r in runs} == {"paper_universe", "paper_ingest", "paper_calendar", "paper_features", "paper_flags", "paper_cards", "paper_state", "paper_report"} and len(runs) == 5 * 8
+    assert {r[0] for r in runs} == {"paper_universe", "paper_ingest", "paper_calendar", "paper_features", "paper_flags", "paper_cards", "paper_state", "paper_report", "paper_shadow", "paper_monitor", "paper_lifecycle"} \
+        and len(runs) == 5 * 10 + 1                                                # + the monthly model evaluation, once (day 1 is the first session of the month)
     assert [s[0] for s in snaps] == days and all(s[1] > 0 for s in snaps) and snaps[0][1] == pytest.approx(1e9)
     t5 = tables(engine)
     assert {(t[0], t[1], t[2], t[3]) for t in t5["targets"]} == {("invest_b1", "2026-01-01", "rebalance", "1"), ("invest_b2", "2026-01-01", "rebalance", "1"),

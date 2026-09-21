@@ -72,7 +72,7 @@ def _persist_fold(engine: Engine, cfg: AppConfig, key: str, preset: InvestPreset
         raw = run.cands.artifact(name)
         mid, ver, sha, reused = register_artifact(
             engine, cfg, raw, f"invest_{key}_{name}_f{run.fold.index:02d}", algo=ALGO, feature_set=iv.feature_set, label_spec=iv.label_spec, dataset_id=setup.dataset_ids.get("invest"),
-            experiment_id=exp_id, seed=iv.seed, artifact_dir=PROJECT_ROOT / iv.artifacts_dir,
+            experiment_id=exp_id, seed=iv.seed, artifact_dir=PROJECT_ROOT / iv.artifacts_dir, strategy=f"invest_{key}", trained_until=run.fold.train_end.date(),
             params={"preset": key, "candidate": name, "horizon": preset.horizon, "fold": run.fold.as_dict(), "n_fit": len(run.data.fit), "n_val": len(run.data.val),
                     "tuning_study": tune_key, "train_range": [str(run.fold.train_start.date()), str(run.fold.train_end.date())], "hypers": run.cands.meta["hypers"].get(name),
                     "inputs": model.inputs()})
@@ -130,7 +130,7 @@ def run_preset(engine: Engine, cfg: AppConfig, setup: Setup, key: str, *, run_id
     for name in fc.models:
         mid, ver, sha, reused = register_artifact(
             engine, cfg, fc.artifact(name), f"invest_{key}_{name}_final", algo=ALGO, feature_set=iv.feature_set, label_spec=iv.label_spec, dataset_id=setup.dataset_ids.get("invest"),
-            experiment_id=exp_id, seed=iv.seed, artifact_dir=PROJECT_ROOT / iv.artifacts_dir,
+            experiment_id=exp_id, seed=iv.seed, artifact_dir=PROJECT_ROOT / iv.artifacts_dir, strategy=f"invest_{key}", trained_until=fd.fold.train_end.date(),
             params={"preset": key, "candidate": name, "horizon": preset.horizon, "fold": fd.fold.as_dict(), "n_fit": len(fd.fit), "n_val": len(fd.val), "hypers": hypers.get(name),
                     "trained_on": "all development data (before the held-out period)", "inputs": fc.models[name].inputs()})
         finals[name] = {"model_id": mid, "version": ver, "sha256": sha, "reused": reused}

@@ -200,6 +200,40 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--file", required=True)
     sb = ad.add_parser("set-basis", help="mark an instrument's bars 'raw' or 'vendor_adjusted'")
     sb.add_argument("--symbol", required=True); sb.add_argument("--basis", required=True, choices=("raw", "vendor_adjusted"))
+
+    # ---- model lifecycle
+    STRATS = ("swing", "invest_b1", "invest_b2", "invest")
+    lp = sub.add_parser("lifecycle", help="model lifecycle: status, trace, monitor, shadow, compare, evaluate, outcomes").add_subparsers(dest="cmd", required=True)
+    lp.add_parser("status", help="models per strategy with their status, the champion and the attempts against it")
+    lh = lp.add_parser("history", help="status changes"); lh.add_argument("--strategy", choices=STRATS[:3]); lh.add_argument("--model-id", type=int)
+    lt = lp.add_parser("trace", help="the full chain of a recommendation: model -> dataset -> feature set -> git commit -> data as known then")
+    lt.add_argument("--recommendation-id", type=int, required=True)
+    lm = lp.add_parser("monitor", help="drift (PSI/KS), rolling IC, calibration, fill rate, holding-time deviation of the champions; alerts on breaches")
+    lm.add_argument("--as-of", type=_d); lm.add_argument("--no-alert", action="store_true")
+    ld = lp.add_parser("due", help="which retrains are due now and why"); ld.add_argument("--as-of", type=_d)
+    ls = lp.add_parser("shadow", help="store today's predictions of the champions and shadow models (or --replay a range of one model)")
+    ls.add_argument("--as-of", type=_d); ls.add_argument("--replay", type=int, metavar="MODEL_ID"); ls.add_argument("--start", type=_d); ls.add_argument("--end", type=_d)
+    lc = lp.add_parser("compare", help="shadow challenger against its champion with the pre-registered rule (no status change)")
+    lc.add_argument("--model-id", type=int, required=True); lc.add_argument("--as-of", type=_d)
+    le = lp.add_parser("evaluate", help="the monthly evaluation: due retrains, shadow comparisons, outcomes")
+    le.add_argument("--as-of", type=_d); le.add_argument("--no-write", action="store_true")
+    lo = lp.add_parser("assess", help="what the closed recommendations say about a champion (hit rate, calibration, holding time)")
+    lo.add_argument("--strategy", choices=STRATS[:3], required=True)
+    lr = lp.add_parser("recalibrate", help="PROPOSE a probability recalibration from closed recommendations (never applied automatically)")
+    lr.add_argument("--strategy", choices=STRATS[:3], default="swing")
+    lml = lp.add_parser("meta-label", help="try a secondary filter model on closed SWING trades (each try is an experiment)")
+    lml.add_argument("--source", choices=("paper", "backtest"), default="paper"); lml.add_argument("--file", help="trades.csv of a `reco backtest` run (source backtest)")
+    lml.add_argument("--no-write", action="store_true")
+    lb = lp.add_parser("backfill-reference", help="store the training-distribution reference of the champions that lack one")
+    rt = sub.add_parser("retrain", help="train a challenger with the current walk-forward protocol and put it in shadow")
+    rt.add_argument("--strategy", choices=STRATS, required=True); rt.add_argument("--trigger", choices=("schedule", "drift", "manual"), required=True)
+    rt.add_argument("--as-of", type=_d); rt.add_argument("--candidates", nargs="*", help="INVEST: only these candidates (default: every fitted one)")
+    rt.add_argument("--consume-holdout", action="store_true", help="allow training data that reaches into the protected held-out period (recorded once; irreversible)")
+    rt.add_argument("--reason", default="")
+    pm = sub.add_parser("promote", help="make a shadow model the champion (re-checks the promotion rule; refuses otherwise)")
+    pm.add_argument("--model-id", type=int, required=True); pm.add_argument("--as-of", type=_d); pm.add_argument("--note", default="")
+    rj = sub.add_parser("reject", help="retire a candidate or shadow model"); rj.add_argument("--model-id", type=int, required=True); rj.add_argument("--reason", required=True)
+    rb = sub.add_parser("rollback", help="back to the champion that the current one replaced"); rb.add_argument("--strategy", choices=STRATS[:3], required=True); rb.add_argument("--reason", required=True)
     return p
 
 
@@ -231,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
         return _reco(args, cfg, engine)
     if args.group == "paper":
         return _paper(args, cfg, engine)
+    if args.group in ("lifecycle", "retrain", "promote", "reject", "rollback"):
+        return _lifecycle(args, cfg, engine)
     if args.group == "calendar":
         with session_scope(engine) as s:
             if args.cmd == "sync":
@@ -301,6 +337,119 @@ def _backtest(args, cfg: AppConfig, engine) -> int:
         print(f"{k:18s} {n['cagr'] * 100:8.1f}% {n['sharpe']:10.2f} {n['max_drawdown'] * 100:6.1f}% {g['cagr'] * 100:9.1f}% {g['sharpe']:12.2f}")
     print(f"stored experiments: {out['experiments']}" + ("" if args.no_report else f"\nreport: {cfg.backtest.report_path}"))
     return 0
+
+
+def _lifecycle(args, cfg: AppConfig, engine) -> int:
+    import pandas as pd
+    from predict_stock.lifecycle import compare as CMP
+    from predict_stock.lifecycle import registry as REG
+    cmd = args.cmd if args.group == "lifecycle" else args.group
+    show = lambda o: print(json.dumps(o, indent=1, default=str, ensure_ascii=False))
+    try:
+        if cmd == "status":
+            for st in REG.STRATEGIES:
+                print(f"{st}:")
+                for status in ("champion", "shadow", "candidate", "retired"):
+                    for m in REG.with_status(engine, st, status)[-4:]:
+                        print(f"  {status:9} #{m.id:<4} {m.name} v{m.version}  trained until {m.trained_until}")
+                print(f"  attempts against the current champion: {CMP.attempts(engine, st, CMP._champion_since(engine, st))}")
+            print(f"held-out period consumed: {CMP.holdout_consumed(engine)}")
+            return 0
+        if cmd == "history":
+            for h in REG.history(engine, model_id=args.model_id, strategy=args.strategy):
+                print(f"{h['at']:%Y-%m-%d %H:%M} #{h['model_id']:<4} {h['from'] or '-':9} -> {h['to']:9} {h['actor']:8} {h['reason'] or ''}")
+            return 0
+        if cmd == "trace":
+            from predict_stock.lifecycle import provenance as PV
+            show(PV.trace(engine, args.recommendation_id))
+            return 0
+        if cmd == "reject":
+            m = CMP.reject(engine, args.model_id, reason=args.reason)
+            print(f"#{m.id} {m.name} v{m.version} retired")
+            return 0
+        if cmd == "rollback":
+            show(CMP.rollback(engine, args.strategy, reason=args.reason))
+            return 0
+        if cmd == "assess":
+            from predict_stock.lifecycle import outcomes as OUT
+            from predict_stock.paper.daily import paper_start
+            show(OUT.assess(OUT.paper_table(engine, args.strategy, paper_start(engine, cfg)), cfg))
+            return 0
+        if cmd == "recalibrate":
+            from predict_stock.lifecycle import outcomes as OUT
+            from predict_stock.paper.daily import paper_start
+            show(OUT.recalibrate(OUT.paper_table(engine, args.strategy, paper_start(engine, cfg)), cfg))
+            return 0
+        if cmd == "meta-label":
+            from predict_stock.lifecycle import outcomes as OUT
+            from predict_stock.paper.daily import paper_start
+            if args.source == "backtest":
+                if not args.file:
+                    print("error: --file trades.csv (from a `reco backtest` run) is needed for source backtest", file=sys.stderr)
+                    return 2
+                df = pd.read_csv(args.file, parse_dates=["as_of"])
+            else:
+                df = OUT.paper_table(engine, "swing", paper_start(engine, cfg))
+            show(OUT.meta_label(engine, cfg, df, write=not args.no_write, source=args.source))
+            return 0
+        from predict_stock.backtest.runner import load_setup
+        setup = load_setup(engine, cfg)
+        d = pd.Timestamp(getattr(args, "as_of", None) or setup.calendar[-1])
+        if cmd == "monitor":
+            from predict_stock.lifecycle import monitor as MON
+            from predict_stock.paper.daily import paper_start
+            res = MON.run_monitor(engine, cfg, setup, d, perf_start=paper_start(engine, cfg), alert=not args.no_alert)
+            show(res)
+            return 0
+        if cmd == "backfill-reference":
+            from predict_stock.lifecycle import monitor as MON
+            for st in REG.STRATEGIES:
+                ref = REG.champion(engine, st)
+                if ref is not None:
+                    print(st, "reference", "stored" if MON.ensure_reference(engine, cfg, setup, ref) else "not available")
+            return 0
+        if cmd == "due":
+            from predict_stock.lifecycle import monitor as MON
+            from predict_stock.lifecycle import retrain as RT
+            from predict_stock.paper.daily import paper_start
+            mon = MON.run_monitor(engine, cfg, setup, d, perf_start=paper_start(engine, cfg), alert=False)
+            show({st: RT.due(engine, cfg, st, d, mon) for st in REG.STRATEGIES})
+            return 0
+        if cmd == "shadow":
+            from predict_stock.lifecycle import shadow as SH
+            if args.replay:
+                n = SH.replay(engine, cfg, setup, args.replay, pd.Timestamp(args.start), pd.Timestamp(args.end))
+                print(f"{n} predictions stored for model #{args.replay}")
+            else:
+                show(SH.shadow_step(engine, cfg, setup, d))
+            return 0
+        if cmd == "compare":
+            show(CMP.compare(engine, cfg, setup, args.model_id, d))
+            return 0
+        if cmd == "promote":
+            show(CMP.promote(engine, cfg, setup, args.model_id, d, note=args.note))
+            return 0
+        if cmd == "evaluate":
+            from predict_stock.lifecycle import job as LJ
+            show(LJ.evaluate(engine, cfg, setup, d, write=not args.no_write))
+            return 0
+        if cmd == "retrain":
+            from predict_stock.lifecycle import retrain as RT
+            targets = ["invest_b1", "invest_b2"] if args.strategy == "invest" else [args.strategy]
+            for st in targets:
+                show(RT.retrain(engine, cfg, st, args.trigger, as_of=d if args.as_of else None, candidates=args.candidates, consume_holdout=args.consume_holdout,
+                                reasons=[args.reason] if args.reason else None, setup=setup))
+            return 0
+    except (REG.LifecycleError, CMP.REG.LifecycleError) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:                                             # noqa: BLE001
+        from predict_stock.lifecycle.retrain import RetrainRefused
+        if isinstance(exc, RetrainRefused):
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
+        raise
+    return 2
 
 
 def _paper(args, cfg: AppConfig, engine) -> int:

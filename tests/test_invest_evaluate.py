@@ -128,5 +128,5 @@ def test_candidate_artifacts_are_registered_idempotently_with_versions(engine, c
     assert a[:2] == (b[0], 1) and b[3] and other[1] == 2 and other[2] == sha256(cands.artifact("lgbm"))
     with engine.connect() as conn:
         status = dict(conn.execute(select(Model.version, Model.status).where(Model.name == "invest_b1_ridge_f00")).all())
-    assert status == {1: "superseded", 2: "candidate"}
+    assert status == {1: "retired", 2: "candidate"}
     assert (tmp_path / "invest_b1_ridge_f00" / "v2.json.gz").read_bytes() == cands.artifact("lgbm")

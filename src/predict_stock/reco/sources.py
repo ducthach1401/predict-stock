@@ -95,10 +95,14 @@ class Market:
 
 
 def _latest_model(engine: Engine, name: str) -> tuple[int, str, str]:
+    """(id, artifact path, sha256) of the model called ``name`` that is IN SERVICE: its champion version if it has one, otherwise the latest version.
+    A shadow challenger (a newer version of the same name) is never picked up here."""
     with session_scope(engine) as s:
-        row = s.scalars(select(Model).where(Model.name == name).order_by(Model.version.desc())).first()
-        if row is None:
+        rows = list(s.scalars(select(Model).where(Model.name == name).order_by(Model.version.desc())))
+        if not rows:
             raise LookupError(f"model {name!r} is not registered: run `swing run` / `invest run` first")
+        champ = [r for r in rows if r.status == "champion"]
+        row = champ[0] if champ else next((r for r in rows if r.status != "shadow"), rows[0])
         return row.id, row.artifact_path, row.artifact_sha256
 
 
