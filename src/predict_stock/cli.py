@@ -127,6 +127,8 @@ def build_parser() -> argparse.ArgumentParser:
     prt = pp.add_parser("restore-test", help="dump now, restore into a scratch database and compare every table with the live one")
     prt.add_argument("--use-latest", action="store_true", help="restore the newest existing dump instead of taking a fresh one")
     pp.add_parser("crontab", help="print the cron entries (nothing is installed)")
+    psch = pp.add_parser("scheduler", help="the container's scheduler: daily job, backup, weekly restore test (same times as `paper crontab`)")
+    psch.add_argument("--once", action="store_true", help="run whatever is due now and exit"); psch.add_argument("--show", action="store_true", help="print the schedule and the state, run nothing")
     pd_ = pp.add_parser("prune-datasets", help="delete Parquet files of old dataset versions that no model was trained on")
     pd_.add_argument("--keep", type=int, default=5)
 
@@ -225,6 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
     lml.add_argument("--source", choices=("paper", "backtest"), default="paper"); lml.add_argument("--file", help="trades.csv of a `reco backtest` run (source backtest)")
     lml.add_argument("--no-write", action="store_true")
     lb = lp.add_parser("backfill-reference", help="store the training-distribution reference of the champions that lack one")
+    lp.add_parser("init-champions", help="a strategy with models but no champion (a fresh install): the latest final model that serves the cards becomes its first champion")
     rt = sub.add_parser("retrain", help="train a challenger with the current walk-forward protocol and put it in shadow")
     rt.add_argument("--strategy", choices=STRATS, required=True); rt.add_argument("--trigger", choices=("schedule", "drift", "manual"), required=True)
     rt.add_argument("--as-of", type=_d); rt.add_argument("--candidates", nargs="*", help="INVEST: only these candidates (default: every fitted one)")
@@ -363,6 +366,9 @@ def _lifecycle(args, cfg: AppConfig, engine) -> int:
             from predict_stock.lifecycle import provenance as PV
             show(PV.trace(engine, args.recommendation_id))
             return 0
+        if cmd == "init-champions":
+            print(json.dumps(REG.init_champions(engine, cfg), indent=1))
+            return 0
         if cmd == "reject":
             m = CMP.reject(engine, args.model_id, reason=args.reason)
             print(f"#{m.id} {m.name} v{m.version} retired")
@@ -455,6 +461,15 @@ def _lifecycle(args, cfg: AppConfig, engine) -> int:
 def _paper(args, cfg: AppConfig, engine) -> int:
     import pandas as pd
     from predict_stock.paper import check_mode
+    if args.cmd == "scheduler":
+        from predict_stock.paper import scheduler as SCH
+        if args.show:
+            print(json.dumps({"jobs": {k: {"at": f"{v['at']:%H:%M}", "weekdays": sorted(v["days"])} for k, v in SCH.jobs(cfg).items()}, "state": SCH.load_state()}, indent=1))
+        elif args.once:
+            print(SCH.tick(cfg))
+        else:
+            SCH.run_forever(cfg)
+        return 0
     if args.cmd == "crontab":
         from predict_stock.paper.schedule import crontab
         print(crontab(cfg))

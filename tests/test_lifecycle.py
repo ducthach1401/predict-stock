@@ -145,6 +145,14 @@ def test_a_candidate_becomes_champion_directly_only_when_the_strategy_has_none(d
     assert REG.champion(db, "swing").id == a
 
 
+def test_init_champions_serves_a_fresh_install_and_leaves_existing_champions_alone(db, cfg, tmp_path):
+    mk(db, cfg, tmp_path, "swing_lgbm_final", payload="v1")
+    newest = mk(db, cfg, tmp_path, "swing_lgbm_final", payload="v2")
+    assert REG.init_champions(db, cfg)["swing"].startswith("swing_lgbm_final v2")
+    assert REG.champion(db, "swing").id == newest and "no invest_b1_factor_final" in REG.init_champions(db, cfg)["invest_b1"]
+    assert REG.init_champions(db, cfg)["swing"] == "already has a champion"
+
+
 def test_a_model_without_a_strategy_cannot_serve(db, cfg, tmp_path):
     mid = mk(db, cfg, tmp_path, "orphan", strategy=None)
     with pytest.raises(REG.LifecycleError):

@@ -109,3 +109,23 @@ def previous_champion(engine: Engine, strategy: str) -> ModelRef | None:
             if cur is None or m.id != cur.id:
                 return _ref(m)
     return None
+
+
+def init_champions(engine: Engine, cfg) -> dict[str, str]:
+    """Fresh install: a strategy that has models but no champion gets the latest final model the cards are built from (SWING: swing_lgbm_final; INVEST: the candidate named by
+    `reco.card_model`). Strategies that already have a champion are left alone."""
+    names = {"swing": "swing_lgbm_final", "invest_b1": f"invest_b1_{cfg.reco.card_model['b1']}_final", "invest_b2": f"invest_b2_{cfg.reco.card_model['b2']}_final"}
+    out: dict[str, str] = {}
+    for strategy, name in names.items():
+        if champion(engine, strategy) is not None:
+            out[strategy] = "already has a champion"
+            continue
+        with session_scope(engine) as s:
+            m = s.scalars(select(Model).where(Model.name == name, Model.strategy == strategy, Model.status == "candidate").order_by(Model.version.desc())).first()
+            mid = None if m is None else m.id
+        if mid is None:
+            out[strategy] = f"no {name} model to promote yet"
+            continue
+        ref = set_status(engine, mid, "champion", actor="init", reason="first champion of a fresh install")
+        out[strategy] = f"{ref.name} v{ref.version} is champion"
+    return out

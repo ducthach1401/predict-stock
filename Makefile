@@ -8,7 +8,7 @@ EFFECTIVE_DATE ?= $(shell date +%F)
 setup: db-up migrate universe
 
 db-up:
-	docker-compose up -d
+	docker-compose up -d mysql
 
 migrate:
 	$(ALEMBIC) upgrade head

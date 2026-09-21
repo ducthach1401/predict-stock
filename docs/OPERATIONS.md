@@ -81,6 +81,10 @@ gunzip -c backups/predict_stock_YYYYMMDD_HHMMSS.sql.gz | mysql -h127.0.0.1 -P330
 ```
 Repeat the daily job for the missed sessions with `paper run --from ... --as-of ...`: the replay rebuilds the paper state from the recommendations and prices.
 
+## Running it in Docker
+
+`bash deploy.sh` builds the image, starts MySQL and a scheduler container that runs the same daily job, backup and restore test as the cron entries below: see [DEPLOY.md](DEPLOY.md). With Docker you do not install cron.
+
 ## Scheduling
 
 Cron with `flock` (single flight; an overlapping or repeated call is harmless because every job is idempotent). `paper crontab` prints the three entries (daily job, daily backup, weekly restore test);
